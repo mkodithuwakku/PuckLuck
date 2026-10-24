@@ -36,9 +36,13 @@ must never open sockets directly:
 - Cache-freshness tests: `os.utime` the parquet mtime into the past, or
   pass `max_age_hours=0`.
 
-## Daily Operations (Phase 5)
+## Daily & Bi-Weekly Operations (Sleep-Proof Cloud + Local)
 
-`com.puckluck.refresh.plist` LaunchAgent, 06:00 America/Edmonton:
+### 1. Sleep-Proof Cloud Execution (GitHub Actions — Runs While Mac Is Asleep/Off)
+- `.github/workflows/refresh.yml` (Phase 8): Runs on GitHub-hosted runners on a scheduled `cron` (morning full slate + intraday odds/pick refreshes before puck drop) and `workflow_dispatch`. Restores `data/puckluck.sqlite3`, `data/cache/moneypuck`, and `data/model_params.json` via `actions/cache`, runs `python -m scripts.refresh --live`, validates `dist/report.json`, and deploys `web/` + `dist/report.json` to `gh-pages`.
+- `.github/workflows/backtest.yml` (Phase 8): Runs every two weeks (`cron: '0 11 1,15 * *'`) in the cloud to evaluate 14-day out-of-sample accuracy & `+EV` ROI and auto-tune `data/model_params.json`.
+
+### 2. Local macOS LaunchAgent (`com.puckluck.refresh.plist`, `RunAtLoad=true` Wake Catch-Up)
 
 ```bash
 launchctl load   ~/Library/LaunchAgents/com.puckluck.refresh.plist
