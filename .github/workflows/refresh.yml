@@ -1,0 +1,73 @@
+name: Refresh & Deploy PuckLuck Pages
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Morning slate + intraday line/pick refreshes before puck drop (UTC)
+    - cron: '30 12,16,21,23 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  refresh-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Restore warehouse & tuned model parameters cache
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: puckluck-data-${{ github.run_id }}
+          restore-keys: |
+            puckluck-data-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync live NHL slate and build allowlisted report
+        run: |
+          export PUCKLUCK_LIVE_DATE="$(date -u +%Y-%m-%d)"
+          python -m scripts.refresh --live || python -m scripts.refresh --demo
+
+      - name: Stage static GitHub Pages bundle (_site)
+        run: |
+          rm -rf _site
+          mkdir -p _site
+          cp web/index.html web/styles.css web/app.js web/manifest.webmanifest web/sw.js _site/
+          cp dist/report.json _site/report.json
+
+      - name: Verify security boundary (no secrets or SQLite in _site)
+        run: |
+          ! find _site -name '.env*' -o -name '*.sqlite3' | grep -q .
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

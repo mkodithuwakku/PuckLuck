@@ -59,6 +59,14 @@ from ingestion.nhl import (
     ingest_boxscore,
     ingest_team_roster,
 )
+from models.backtest import (
+    DEFAULT_MODEL_PARAMS_PATH,
+    BacktestReport,
+    TunedModelParams,
+    load_model_params,
+    run_walk_forward_backtest,
+    save_model_params,
+)
 from models.ridge import ComponentRidgeModel, ScoringRescorer
 
 STALE_AFTER_HOURS: float = 26.0
@@ -76,6 +84,7 @@ TOP_LEVEL_ALLOWLIST: FrozenSet[str] = frozenset(
         "free_agents",
         "teams",
         "point_scorers",
+        "model_health",
     }
 )
 TEAM_SUMMARY_ALLOWLIST: FrozenSet[str] = frozenset(
@@ -195,6 +204,21 @@ FANTASY_TEAM_ENTRY_ALLOWLIST: FrozenSet[str] = frozenset(
         "waiver_targets",
     }
 )
+MODEL_HEALTH_ALLOWLIST: FrozenSet[str] = frozenset(
+    {
+        "window_start",
+        "window_end",
+        "samples_evaluated",
+        "games_evaluated",
+        "fantasy_point_mae",
+        "totals_brier_score",
+        "ewma_alpha",
+        "ridge_l2_penalty",
+        "poisson_base_rate",
+        "suggestions",
+        "improved_over_baseline",
+    }
+)
 
 FORBIDDEN_KEY_SUBSTRINGS: Tuple[str, ...] = (
     "secret",
@@ -224,6 +248,7 @@ _ALLOWED_KEYS_ALL: FrozenSet[str] = frozenset(
     | RECOMMENDATION_ALLOWLIST
     | POINT_SCORER_ALLOWLIST
     | FANTASY_TEAM_ENTRY_ALLOWLIST
+    | MODEL_HEALTH_ALLOWLIST
 )
 
 
@@ -254,6 +279,31 @@ def _filter_team_entry(entry: Any) -> Dict[str, Any]:
     }
 
 
+def _filter_model_health(raw_mh: Any) -> Dict[str, Any]:
+    if isinstance(raw_mh, BacktestReport):
+        raw_mh = {
+            "window_start": raw_mh.window_start,
+            "window_end": raw_mh.window_end,
+            "samples_evaluated": raw_mh.samples_evaluated,
+            "games_evaluated": raw_mh.games_evaluated,
+            "fantasy_point_mae": raw_mh.fantasy_point_mae,
+            "totals_brier_score": raw_mh.totals_brier_score,
+            "ewma_alpha": raw_mh.recommended_params.ewma_alpha,
+            "ridge_l2_penalty": raw_mh.recommended_params.ridge_l2_penalty,
+            "poisson_base_rate": raw_mh.recommended_params.poisson_base_rate,
+            "suggestions": [str(s) for s in raw_mh.suggestions],
+            "improved_over_baseline": bool(raw_mh.improved_over_baseline),
+        }
+    filtered = _filter_dict(raw_mh, MODEL_HEALTH_ALLOWLIST)
+    if "suggestions" in filtered:
+        sug = filtered["suggestions"]
+        if isinstance(sug, Sequence) and not isinstance(sug, (str, bytes)):
+            filtered["suggestions"] = [str(s) for s in sug]
+        else:
+            filtered["suggestions"] = []
+    return filtered
+
+
 def sanitize_public_report(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Strip every key outside the per-section allowlists."""
     report: Dict[str, Any] = {}
@@ -281,6 +331,8 @@ def sanitize_public_report(raw: Dict[str, Any]) -> Dict[str, Any]:
         report["point_scorers"] = _filter_items(
             raw["point_scorers"], POINT_SCORER_ALLOWLIST
         )
+    if "model_health" in raw and raw["model_health"] is not None:
+        report["model_health"] = _filter_model_health(raw["model_health"])
     return report
 
 
@@ -338,6 +390,18 @@ def validate_public_report(report: Dict[str, Any]) -> None:
         for key in item:
             if key not in POINT_SCORER_ALLOWLIST:
                 raise ValueError(f"non-allowlisted point_scorers key: {key!r}")
+    mh = report.get("model_health")
+    if mh is not None:
+        if not isinstance(mh, dict):
+            raise ValueError("model_health must be a dict")
+        for key in mh:
+            if key not in MODEL_HEALTH_ALLOWLIST:
+                raise ValueError(f"non-allowlisted model_health key: {key!r}")
+        if "suggestions" in mh and (
+            not isinstance(mh["suggestions"], list)
+            or not all(isinstance(s, str) for s in mh["suggestions"])
+        ):
+            raise ValueError("model_health.suggestions must be a list of strings")
     _walk_forbidden(report)
 
 
@@ -370,6 +434,7 @@ def build_public_report(
     free_agents: Sequence[Dict[str, Any]] = (),
     teams: Sequence[Dict[str, Any]] = (),
     point_scorers: Sequence[Dict[str, Any]] = (),
+    model_health: Optional[Union[BacktestReport, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Assemble, sanitize, and validate the public report payload."""
     raw: Dict[str, Any] = {
@@ -397,6 +462,8 @@ def build_public_report(
             raw["recommendation"] = _recommendation_dict(first_rec)
     if point_scorers:
         raw["point_scorers"] = list(point_scorers)
+    if model_health is not None:
+        raw["model_health"] = _filter_model_health(model_health)
 
     report = sanitize_public_report(raw)
     validate_public_report(report)
@@ -1365,17 +1432,21 @@ def run_warehouse_pipeline(
     generated_at: Optional[str] = None,
     active_slate_date: Optional[str] = None,
     slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
+    model_params: Optional[TunedModelParams] = None,
+    model_params_path: Union[str, Path] = DEFAULT_MODEL_PARAMS_PATH,
+    model_health: Optional[Union[BacktestReport, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run FeatureBuilder -> Ridge -> Rescorer -> Solver/Poisson -> report."""
     weights = stat_weights or DEFAULT_STAT_WEIGHTS
     rescorer = ScoringRescorer(weights)
+    params = model_params or load_model_params(model_params_path)
 
-    fb = FeatureBuilder(conn)
+    fb = FeatureBuilder(conn, alpha=params.ewma_alpha)
     X, y_by_comp, _sample_keys = fb.build_training_dataset(
         as_of_date, min_prior_games=1
     )
     model = (
-        ComponentRidgeModel(l2_penalty=1.0).fit(X, y_by_comp)
+        ComponentRidgeModel(l2_penalty=params.ridge_l2_penalty).fit(X, y_by_comp)
         if X.shape[0] >= 2
         else None
     )
@@ -1513,7 +1584,11 @@ def run_warehouse_pipeline(
 
     fa_items.sort(key=lambda f: -float(f["ixg_per60_ewma"]))
     game_items, slate_team_ids = _build_game_items(
-        conn, as_of_date, abbrs, slate_matchups
+        conn,
+        as_of_date,
+        abbrs,
+        slate_matchups,
+        base_rate=params.poisson_base_rate,
     )
 
     # Two fantasy teams: group rostered players by yahoo prefix; if all share
@@ -1616,6 +1691,7 @@ def run_warehouse_pipeline(
         games=game_items,
         teams=team_entries,
         point_scorers=point_scorers,
+        model_health=model_health,
     )
 
 
@@ -1624,6 +1700,8 @@ def _build_game_items(
     as_of_date: str,
     abbrs: Dict[int, str],
     slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
+    *,
+    base_rate: float = 3.05,
 ) -> Tuple[List[Dict[str, Any]], FrozenSet[int]]:
     """Build the games list; returns (items, team_ids on tonight's slate)."""
     consensus = _market_game_rows(conn)
@@ -1634,6 +1712,10 @@ def _build_game_items(
     fallback_pairs = _recent_pair_stream(conn, as_of_date)
     items: List[Dict[str, Any]] = []
     slate_team_ids: set = set()
+    eg_params = inspect.signature(compute_expected_goals).parameters
+    accepts_base_rate = "base_rate" in eg_params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in eg_params.values()
+    )
     for idx, market in enumerate(consensus):
         game_id = market["game_id"]
         pairing = matchup_map.get(game_id)
@@ -1647,7 +1729,12 @@ def _build_game_items(
         home_inputs, away_inputs = build_matchup_inputs_from_db(
             conn, home_id, away_id, as_of_date
         )
-        lam_home, lam_away = _lambdas(compute_expected_goals(home_inputs, away_inputs))
+        expected = (
+            compute_expected_goals(home_inputs, away_inputs, base_rate=base_rate)
+            if accepts_base_rate
+            else compute_expected_goals(home_inputs, away_inputs)
+        )
+        lam_home, lam_away = _lambdas(expected)
         price = _price_total(lam_home, lam_away, float(market["line"]))
 
         line_obj = _make_market_line(
@@ -1728,13 +1815,26 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
         default=3,
         help="Completed slate days to ingest boxscores for (live mode).",
     )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run walk-forward backtest, self-tune model_params.json, and "
+        "include model_health in the report.",
+    )
+    parser.add_argument(
+        "--params-path",
+        default=os.environ.get(
+            "PUCKLUCK_MODEL_PARAMS_PATH", str(DEFAULT_MODEL_PARAMS_PATH)
+        ),
+    )
     args = parser.parse_args(argv)
 
     conn = db.init_db(args.db_path)
     try:
         if args.live:
+            live_date = os.environ.get("PUCKLUCK_LIVE_DATE") or args.date
             active_date, scheduled = sync_live_nhl_slate(
-                conn, args.date, lookback_days=args.lookback_days
+                conn, live_date, lookback_days=args.lookback_days
             )
             slate_matchups = {
                 g.game_id: (g.home_team_id, g.away_team_id) for g in scheduled
@@ -1744,11 +1844,17 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
             slate_matchups = None
             if args.demo or _dim_players_empty(conn):
                 seed_demo_warehouse(conn, as_of_date=args.date)
+        bt_report: Optional[BacktestReport] = None
+        if args.backtest:
+            bt_report = run_walk_forward_backtest(conn, as_of_date=active_date)
+            save_model_params(bt_report.recommended_params, args.params_path)
         report = run_warehouse_pipeline(
             conn,
             as_of_date=active_date,
             active_slate_date=active_date,
             slate_matchups=slate_matchups,
+            model_params_path=args.params_path,
+            model_health=bt_report,
         )
         path = write_report_json(report, args.output)
     finally:

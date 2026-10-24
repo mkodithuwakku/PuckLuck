@@ -19,11 +19,13 @@
 		<key>Minute</key>
 		<integer>0</integer>
 	</dict>
+	<key>StartInterval</key>
+	<integer>3600</integer>
 	<key>StandardOutPath</key>
 	<string>data/logs/refresh.log</string>
 	<key>StandardErrorPath</key>
 	<string>data/logs/refresh.log</string>
 	<key>RunAtLoad</key>
-	<false/>
+	<true/>
 </dict>
 </plist>
