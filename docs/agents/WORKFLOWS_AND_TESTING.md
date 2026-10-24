@@ -62,3 +62,4 @@ signatures, and deterministic test fixtures.
 - `docs/runbooks/PHASE_3_FANTASY_ENGINE.md` — Phase 3: FeatureBuilder (`features/builder.py`), ComponentRidge (`models/ridge.py`), H-week Add/Drop Solver (`fantasy/solver.py`)
 - `docs/runbooks/PHASE_4_BETTING_ENGINE.md` — Phase 4: Bivariate Poisson Goal Model (`betting/poisson.py`) + Consensus Odds & +EV Screener (`betting/ev.py`)
 - `docs/runbooks/PHASE_5_DELIVERY_AND_PWA.md` — Phase 5: Allowlisted Report Export & LaunchAgent (`scripts/`), Loopback FastAPI (`api/`), Mobile PWA Dashboard & Node Policy Suite (`web/`)
+- `docs/runbooks/PHASE_6_E2E_PIPELINE_AND_DEMO.md` — Phase 6: End-to-End Warehouse Orchestration, Yahoo-Optional Demo Mode (`scripts/refresh.py`) & Static PWA Mount (`api/server.py`)
