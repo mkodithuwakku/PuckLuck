@@ -189,7 +189,7 @@ def test_fastapi_health_and_report_endpoints(tmp_path: Path) -> None:
     )
     assert cors[0].kwargs["allow_methods"] == ["GET"]
 
-    routes = {r.path: r.endpoint for r in app.routes}
+    routes = {r.path: r.endpoint for r in app.routes if hasattr(r, "endpoint")}
     health = routes["/api/health"]()
     assert health == {"status": "ok", "host": "127.0.0.1", "port": 8877}
 
@@ -197,9 +197,9 @@ def test_fastapi_health_and_report_endpoints(tmp_path: Path) -> None:
     validate_public_report(payload)  # served payload is allowlisted
     assert payload["generated_at"] == "2026-10-23T12:00:00+00:00"
 
-    # Missing file -> synthesized empty-but-valid report.
+    # Missing file -> synthesized populated demo report.
     app2 = create_app(report_path=tmp_path / "absent.json")
-    routes2 = {r.path: r.endpoint for r in app2.routes}
+    routes2 = {r.path: r.endpoint for r in app2.routes if hasattr(r, "endpoint")}
     payload2 = routes2["/api/report"]()
     validate_public_report(payload2)
 
@@ -218,3 +218,56 @@ def test_launchd_plist_and_publish_script_contracts() -> None:
     assert "dist/report.json" in script
     # Security boundary present in the script itself.
     assert ".env" in script and "sqlite3" in script
+
+
+def test_end_to_end_demo_pipeline_populates_all_sections(tmp_path: Path) -> None:
+    out = refresh.main(
+        [
+            "--db-path",
+            str(tmp_path / "wh.sqlite3"),
+            "--output",
+            str(tmp_path / "report.json"),
+            "--demo",
+        ]
+    )
+    report = json.loads(Path(out).read_text())
+    validate_public_report(report)
+
+    assert len(report["roster"]) >= 4
+    assert any(
+        r.get("position") == "G" and r.get("goalie_status") == "CONFIRMED"
+        for r in report["roster"]
+    )
+    assert len(report["free_agents"]) >= 2
+    assert all(fa["ixg_per60_ewma"] > 0 for fa in report["free_agents"])
+    assert report["recommendation"]["action"] in {
+        "RECOMMEND_SWAP",
+        "HOLD_ASSET",
+    }
+    assert len(report["games"]) >= 2
+    assert all(g["expected_total"] > 0 and g["line"] > 0 for g in report["games"])
+
+
+def test_fastapi_serves_report_json_and_mounts_web_static(
+    tmp_path: Path,
+) -> None:
+    app = create_app(report_provider=lambda: _valid_report())
+    routes = {r.path: r.endpoint for r in app.routes if hasattr(r, "endpoint")}
+
+    api_payload = routes["/api/report"]()
+    json_payload = routes["/report.json"]()
+    assert api_payload == json_payload
+    validate_public_report(json_payload)
+
+    # StaticFiles mount for the PWA at "/" when web/ exists.
+    assert (REPO_ROOT / "web").is_dir()
+    mounts = [r for r in app.routes if hasattr(r, "app")]
+    assert mounts, "expected a StaticFiles mount for web/"
+
+    # Missing file -> populated demo report (not an empty shell).
+    app2 = create_app(report_path=tmp_path / "absent.json")
+    routes2 = {r.path: r.endpoint for r in app2.routes if hasattr(r, "endpoint")}
+    demo = routes2["/report.json"]()
+    validate_public_report(demo)
+    assert len(demo["roster"]) >= 4
+    assert len(demo["games"]) >= 2

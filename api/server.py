@@ -2,9 +2,12 @@
 
 Binds strictly to ``127.0.0.1:8877`` — ``validate_bind_host`` rejects
 ``0.0.0.0`` and any non-loopback address, and CORS is restricted to
-local development origins. The ``/api/report`` endpoint serves the same
-allowlisted payload that gets published to gh-pages, re-validated on
-every read.
+local development origins. ``/api/report`` and ``/report.json`` serve
+the same allowlisted payload that gets published to gh-pages,
+re-validated on every read, and ``web/`` is mounted at ``/`` so the PWA
+renders out of the box. When no report exists on disk yet, a populated
+in-memory demo warehouse drives the payload so a clean checkout serves
+a working dashboard immediately.
 """
 
 from __future__ import annotations
@@ -15,10 +18,13 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+import db
 from scripts.refresh import (
     DEFAULT_REPORT_PATH,
-    build_public_report,
+    run_warehouse_pipeline,
+    seed_demo_warehouse,
     validate_public_report,
 )
 
@@ -43,12 +49,23 @@ def validate_bind_host(host: str) -> str:
     return host
 
 
+def _demo_report() -> Dict[str, Any]:
+    """Populated report from an ephemeral in-memory demo warehouse."""
+    conn = db.init_db(":memory:")
+    try:
+        seed_demo_warehouse(conn)
+        return run_warehouse_pipeline(conn)
+    finally:
+        conn.close()
+
+
 def create_app(
     *,
     report_path: Union[str, Path] = DEFAULT_REPORT_PATH,
     report_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+    web_dir: Optional[Union[str, Path]] = Path("web"),
 ) -> FastAPI:
-    """Build the loopback app: GET /api/health and GET /api/report only."""
+    """Build the loopback app: health, allowlisted report, static PWA."""
     path = Path(report_path)
     app = FastAPI(title="PuckLuck", docs_url=None, redoc_url=None)
     app.add_middleware(
@@ -61,6 +78,7 @@ def create_app(
     def health() -> Dict[str, Any]:
         return {"status": "ok", "host": DEFAULT_HOST, "port": DEFAULT_PORT}
 
+    @app.get("/report.json")
     @app.get("/api/report")
     def report() -> Dict[str, Any]:
         if report_provider is not None:
@@ -68,7 +86,7 @@ def create_app(
         elif path.is_file():
             payload = json.loads(path.read_text())
         else:
-            payload = build_public_report()
+            payload = _demo_report()
         try:
             validate_public_report(payload)
         except ValueError as exc:
@@ -76,6 +94,13 @@ def create_app(
                 status_code=500, detail="report failed allowlist validation"
             ) from exc
         return payload
+
+    if web_dir is not None and Path(web_dir).is_dir():
+        app.mount(
+            "/",
+            StaticFiles(directory=str(web_dir), html=True),
+            name="puckluck-web",
+        )
 
     return app
 
