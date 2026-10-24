@@ -14,6 +14,7 @@ venv/
 data/*.sqlite3
 data/*.sqlite3-*
 data/cache/
+data/model_params.json
 
 # Generated static export (published via gh-pages branch only)
 dist/report.json

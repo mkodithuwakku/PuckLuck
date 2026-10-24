@@ -49,6 +49,11 @@ from fantasy.solver import (
     solve_best_stream,
 )
 from features.builder import FeatureBuilder
+from ingestion.moneypuck import (
+    load_goalies,
+    load_skaters,
+    update_cache,
+)
 from ingestion.nhl import (
     NHL_API_BASE,
     TEAM_ALTITUDE_FT,
@@ -1104,6 +1109,15 @@ def resolve_active_slate(
         active = played[-1] if played else request_date
 
     completed = sorted(d for d in days if d < active and days[d])
+    prev_start = str(payload.get("previousStartDate") or "").strip()
+    if len(completed) < 4 and prev_start:
+        try:
+            prev_payload = nhl_fetcher(f"{NHL_API_BASE}/schedule/{prev_start}")
+            for day, games in _week_days(prev_payload, prev_start).items():
+                days.setdefault(day, games)
+            completed = sorted(d for d in days if d < active and days[d])
+        except Exception:
+            pass
     scheduled = fetch_schedule(active, fetcher=nhl_fetcher)
     return active, scheduled, completed
 
@@ -1359,6 +1373,52 @@ def _seed_baseline_props(conn: sqlite3.Connection, slate_date: str) -> None:
     _insert_fact_rows(conn, "fact_market_lines", rows)
 
 
+def extract_moneypuck_metrics(
+    skaters_df: Any = None, goalies_df: Any = None
+) -> Dict[int, Dict[str, float]]:
+    """Build per-player per-game MoneyPuck advanced metric lookup for boxscores."""
+    metrics: Dict[int, Dict[str, float]] = {}
+    if skaters_df is not None and len(skaters_df) > 0:
+        df = skaters_df
+        if "situation" in df.columns:
+            all_rows = df[df["situation"] == "all"]
+            if len(all_rows) > 0:
+                df = all_rows
+        for row in df.to_dict("records"):
+            pid = _to_int(row.get("playerId"), 0)
+            if pid <= 0:
+                continue
+            gp = max(1.0, _to_float(row.get("games_played"), 1.0))
+            ixg = _to_float(row.get("I_F_xGoals"), 0.0) / gp
+            icorsi = int(round(_to_float(row.get("I_F_shotAttempts"), 0.0) / gp))
+            ihdcf = int(round(_to_float(row.get("I_F_highDangerShots"), 0.0) / gp))
+            xgf = _to_float(row.get("OnIce_F_xGoals"), 0.0)
+            xga = _to_float(row.get("OnIce_A_xGoals"), 0.0)
+            xg_share = xgf / (xgf + xga) if (xgf + xga) > 0 else 0.5
+            metrics[pid] = {
+                "ixg": round(ixg, 4),
+                "icorsi": icorsi,
+                "ihdcf": ihdcf,
+                "on_ice_xg_share": round(xg_share, 4),
+            }
+    if goalies_df is not None and len(goalies_df) > 0:
+        df = goalies_df
+        if "situation" in df.columns:
+            all_rows = df[df["situation"] == "all"]
+            if len(all_rows) > 0:
+                df = all_rows
+        for row in df.to_dict("records"):
+            pid = _to_int(row.get("playerId"), 0)
+            if pid <= 0:
+                continue
+            gp = max(1.0, _to_float(row.get("games_played"), 1.0))
+            gsax = _to_float(row.get("goalsSavedAboveExpected"), 0.0) / gp
+            entry = dict(metrics.get(pid) or {})
+            entry["gsax"] = round(gsax, 4)
+            metrics[pid] = entry
+    return metrics
+
+
 def sync_live_nhl_slate(
     conn: sqlite3.Connection,
     target_date: str = "2026-10-23",
@@ -1372,9 +1432,26 @@ def sync_live_nhl_slate(
 
     Returns ``(active_slate_date, scheduled_games)``.
     """
+    demo_row = conn.execute(
+        "SELECT 1 FROM dim_teams WHERE team_id = 25 AND abbreviation = 'EDM'"
+    ).fetchone()
+    if demo_row is not None:
+        conn.execute("DELETE FROM fact_skater_games")
+        conn.execute("DELETE FROM fact_goalie_games")
+        conn.execute("DELETE FROM fact_market_lines")
+        conn.execute("DELETE FROM dim_players")
+        conn.execute("DELETE FROM dim_teams")
+
     active, scheduled, completed = resolve_active_slate(
         target_date, nhl_fetcher=nhl_fetcher
     )
+
+    adv_metrics: Dict[int, Dict[str, float]] = {}
+    try:
+        update_cache()
+        adv_metrics = extract_moneypuck_metrics(load_skaters(), load_goalies())
+    except Exception:
+        adv_metrics = {}
 
     for day in completed[-max(1, int(lookback_days)) :]:
         try:
@@ -1383,7 +1460,12 @@ def sync_live_nhl_slate(
             continue
         for game in day_games:
             try:
-                ingest_boxscore(conn, game.game_id, fetcher=nhl_fetcher)
+                ingest_boxscore(
+                    conn,
+                    game.game_id,
+                    fetcher=nhl_fetcher,
+                    advanced_metrics=adv_metrics,
+                )
             except Exception:
                 continue
 
@@ -1396,12 +1478,19 @@ def sync_live_nhl_slate(
             game.venue,
             altitude_ft=TEAM_ALTITUDE_FT.get(game.home_abbr, 0),
         )
+        existing_away = conn.execute(
+            "SELECT venue FROM dim_teams WHERE team_id = ?",
+            (game.away_team_id,),
+        ).fetchone()
+        away_venue = (
+            existing_away[0] if existing_away and existing_away[0] else game.away_name
+        )
         db.upsert_team(
             conn,
             game.away_team_id,
             game.away_abbr,
             game.away_name,
-            "",
+            away_venue,
             altitude_ft=TEAM_ALTITUDE_FT.get(game.away_abbr, 0),
         )
         for abbr in (game.home_abbr, game.away_abbr):
@@ -1812,7 +1901,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
     parser.add_argument(
         "--lookback-days",
         type=int,
-        default=3,
+        default=7,
         help="Completed slate days to ingest boxscores for (live mode).",
     )
     parser.add_argument(
