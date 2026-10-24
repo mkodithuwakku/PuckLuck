@@ -408,6 +408,6 @@ Before writing any application code in the new repository, Agent 1 MUST initiali
 - [x] **Phase 4: Game Totals & Betting Evaluator**
   - Implement Bivariate Poisson simulator.
   - Build consensus line odds parser and $+\text{EV}$ screener.
-- [ ] **Phase 5: Automated Scheduler & Static Dashboard**
+- [x] **Phase 5: Automated Scheduler & Static Dashboard**
   - Build LaunchAgent plist and publication pipeline.
   - Implement responsive desktop/mobile UI in `web/`.

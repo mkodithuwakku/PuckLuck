@@ -17,9 +17,9 @@ undocumented schemas or scrape unstable pages.
 ## Verification (run before any commit)
 
 ```bash
-.venv/bin/python -m pytest          # unit suite — offline only, sockets blocked
-.venv/bin/black .                   # deterministic formatter, 100% compliance
-node --test web/tests/              # frontend policy tests (Phase 5)
+.venv/bin/python -m pytest                   # unit suite — offline only, sockets blocked
+.venv/bin/black .                            # deterministic formatter, 100% compliance
+node --test web/tests/dashboard.test.mjs     # frontend policy tests (Phase 5)
 ```
 
 ## Invariants

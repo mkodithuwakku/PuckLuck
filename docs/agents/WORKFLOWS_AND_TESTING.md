@@ -8,7 +8,7 @@
 | Single file                  | `.venv/bin/python -m pytest tests/test_db.py`  |
 | Formatting (check)           | `.venv/bin/black --check .`                    |
 | Formatting (apply)           | `.venv/bin/black .`                            |
-| Frontend policy tests        | `node --test web/tests/` (Phase 5)             |
+| Frontend policy tests        | `node --test web/tests/dashboard.test.mjs`     |
 
 All three gates from SRS §8 must be green before merging a phase:
 pytest (offline), black (100%), node --test (once `web/` exists).

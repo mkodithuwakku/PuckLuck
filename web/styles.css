@@ -1,0 +1,230 @@
+/* PuckLuck design system — SRS §6.1 visual tokens. */
+
+:root {
+  --bg-base: #141619;
+  --bg-surface: #1c2026;
+  --accent-cyan: #4da6ff;
+  --text-primary: #e8edf2;
+  --text-secondary: #8b98a8;
+  --line-subtle: #262d38;
+  --gold-subtle: #c9a86a;
+  --steel-muted: #6d7a8c;
+  --emerald: #2fbf71;
+  --amber: #d9963c;
+  --plum: #8e5ea8;
+  --danger: #e05d5d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/* ---------- Compact header (roster-first hierarchy, SRS §6.1.1) ---------- */
+
+.pl-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--line-subtle);
+  flex-wrap: wrap;
+}
+
+.pl-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  color: var(--bg-base);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.pl-team-meta { display: flex; flex-direction: column; min-width: 0; }
+.pl-team-name { font-weight: 700; font-size: 14px; }
+.pl-league-name {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pl-header-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  background: var(--bg-base);
+  border: 1px solid var(--line-subtle);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.pill strong { color: var(--text-primary); }
+
+.stale-banner {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(224, 93, 93, 0.14);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- Main panels ---------- */
+
+main.pl-main { padding: 10px 12px 84px; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.section-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  margin: 4px 0 8px;
+}
+
+/* ---------- Cards & rows ---------- */
+
+.card, .roster-row, .game-card, .fa-row, .adddrop-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--line-subtle);
+  border-radius: 10px;
+}
+
+.roster-row, .fa-row {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  margin-bottom: 6px;
+}
+.fa-row { grid-template-columns: 1fr auto; }
+
+.slot-chip {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  background: rgba(77, 166, 255, 0.1);
+  border-radius: 6px;
+  text-align: center;
+  padding: 4px 0;
+}
+
+.player-name { font-weight: 600; font-size: 14px; }
+.player-sub { color: var(--text-secondary); font-size: 11px; }
+.stat-line { display: flex; gap: 10px; color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+.stat-line b { color: var(--text-primary); font-weight: 600; }
+.fp-col { text-align: right; font-weight: 700; font-size: 15px; }
+.fp-col small { display: block; color: var(--text-secondary); font-weight: 500; font-size: 10px; }
+
+/* ---------- Badges (SRS §6.1.2 status tokens) ---------- */
+
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.badge-confirmed { color: var(--gold-subtle); border: 1px solid var(--gold-subtle); }
+.badge-projected { color: var(--steel-muted); border: 1px solid var(--steel-muted); }
+.badge-add { color: var(--emerald); border: 1px solid var(--emerald); }
+.badge-hold { color: var(--plum); border: 1px solid var(--plum); }
+.badge-ev { color: var(--emerald); border: 1px solid var(--emerald); }
+.badge-postponed { color: var(--amber); border: 1px solid var(--amber); }
+.badge-stale { color: var(--danger); border: 1px solid var(--danger); }
+
+/* ---------- Add/Drop solver card ---------- */
+
+.adddrop-card { padding: 12px; }
+.adddrop-head { display: flex; align-items: center; gap: 8px; }
+.adddrop-explanation { color: var(--text-secondary); font-size: 12px; margin-top: 8px; }
+.math-drawer { margin-top: 10px; border-top: 1px solid var(--line-subtle); padding-top: 8px; }
+.math-drawer summary { cursor: pointer; color: var(--accent-cyan); font-size: 12px; }
+.math-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+.math-row span:last-child { font-variant-numeric: tabular-nums; }
+
+.stale-disabled { opacity: 0.45; filter: grayscale(0.6); pointer-events: none; }
+
+/* ---------- Game totals ---------- */
+
+.game-card { padding: 10px 12px; margin-bottom: 8px; }
+.game-top { display: flex; justify-content: space-between; align-items: baseline; }
+.game-teams { font-weight: 700; font-size: 14px; }
+.game-time { color: var(--text-secondary); font-size: 11px; }
+.game-metrics { display: flex; gap: 14px; margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+.game-metrics b { color: var(--text-primary); }
+.game-goalies { margin-top: 6px; font-size: 11px; color: var(--text-secondary); }
+
+/* ---------- Free agents ---------- */
+
+.fa-search {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--line-subtle);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.fa-metrics { display: flex; gap: 10px; font-size: 11px; color: var(--text-secondary); }
+
+/* ---------- Fixed bottom nav (375px–430px mobile-first, SRS §6.1.3) ---------- */
+
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--line-subtle);
+  padding-bottom: env(safe-area-inset-bottom);
+  z-index: 20;
+}
+.nav-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 10px 2px;
+  letter-spacing: 0.02em;
+}
+.nav-btn.active { color: var(--accent-cyan); }
+
+@media (min-width: 768px) {
+  main.pl-main { max-width: 640px; margin: 0 auto; padding-bottom: 24px; }
+  .bottom-nav { position: sticky; max-width: 640px; margin: 0 auto; }
+}

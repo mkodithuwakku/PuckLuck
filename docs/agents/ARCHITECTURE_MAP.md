@@ -100,3 +100,9 @@ MoneyPuck bulk CSV/parquet ┘                     │
   `screen_positive_ev` enforce the $+3.5\%$ EV gate while excluding
   `LOW_LIQUIDITY_BOOKS`, and `upsert_total_line` deduplicates NULL
   `target_id` rows in `fact_market_lines`.
+- **Delivery, API & Mobile PWA (`scripts/`, `api/`, `web/`):**
+  `scripts/refresh.py` enforces per-section allowlists and blocks secret keys
+  or local filesystem paths before atomically writing `dist/report.json`;
+  `api/server.py` binds strictly to loopback (`127.0.0.1:8877`) with local-only
+  CORS; `web/` renders the roster-first 4-tab standalone PWA with 26-hour
+  `STALE DATA` gating.
