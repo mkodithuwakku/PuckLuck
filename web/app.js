@@ -1,11 +1,50 @@
-/* PuckLuck dashboard renderer (SRS §6.1/§6.2).
+/* PuckLuck dashboard renderer (SRS §6.1/§6.2, Phase 7B).
  *
  * Pure ES module: every render function returns an HTML string so the
  * same code runs in the browser and under `node --test`. Browser glue
- * (fetch + tab binding) is guarded behind `typeof document`.
+ * (fetch + tab/team/filter binding + auto-refresh) is guarded behind
+ * `typeof document`.
  */
 
 export const STALE_THRESHOLD_HOURS = 26;
+export const AUTO_REFRESH_INTERVAL_MS = 300_000;
+
+export const TEAM_COLORS = {
+  EDM: ["#FF4C00", "#041E42"],
+  COL: ["#6F263D", "#236192"],
+  TOR: ["#00205B", "#4da6ff"],
+  CAR: ["#CC0000", "#111111"],
+  FLA: ["#C8102E", "#B9975B"],
+  NYR: ["#0038A8", "#CE1126"],
+  BOS: ["#FFB81C", "#111111"],
+  TBL: ["#002868", "#4da6ff"],
+  DAL: ["#006847", "#8F8F8C"],
+  VGK: ["#B4975A", "#333F42"],
+  WPG: ["#041E42", "#AC162C"],
+  VAN: ["#00843D", "#00205B"],
+  CGY: ["#D2001C", "#FAAF19"],
+  LAK: ["#A2AAAD", "#111111"],
+  SEA: ["#99D9D9", "#001628"],
+  NJD: ["#CE1126", "#111111"],
+  WSH: ["#C8102E", "#041E42"],
+  PIT: ["#FCB514", "#000000"],
+  PHI: ["#F74902", "#000000"],
+  CBJ: ["#002654", "#CE1126"],
+  DET: ["#CE1126", "#FFFFFF"],
+  BUF: ["#003087", "#FFB81C"],
+  OTT: ["#C52032", "#C2912C"],
+  MTL: ["#AF1E2D", "#192168"],
+  STL: ["#002F87", "#FCB514"],
+  MIN: ["#154734", "#A6192E"],
+  NSH: ["#FFB81C", "#041E42"],
+  CHI: ["#CF0A2C", "#000000"],
+  UTA: ["#69B3E7", "#010101"],
+  ANA: ["#F47A38", "#B9975B"],
+  SJS: ["#006D75", "#EA7200"],
+  NYI: ["#00539B", "#F47D30"],
+};
+
+const DEFAULT_TEAM_COLORS = ["#4da6ff", "#1c2026"];
 
 const SLOT_ORDER = ["C", "LW", "RW", "D", "UTIL", "G", "BN", "IR", "IR+"];
 
@@ -13,8 +52,10 @@ const TAB_DEFS = [
   ["roster", "01 Roster"],
   ["adddrop", "02 Add / Drop"],
   ["totals", "03 Game Totals"],
-  ["agents", "04 Free Agents"],
+  ["scorers", "04 Point Scorers"],
 ];
+
+const SCORER_FILTERS = ["ALL", "POINTS", "GOALS", "ASSISTS", "+EV"];
 
 const ESCAPES = {
   "&": "&amp;",
@@ -49,6 +90,37 @@ function fmtSigned1(value) {
   return text.startsWith("-") ? text : `+${text}`;
 }
 
+function fmtSignedPct(value) {
+  const n = Number(value) * 100;
+  const text = Number.isFinite(n) ? n.toFixed(1) : "0.0";
+  return `${text.startsWith("-") ? text : `+${text}`}%`;
+}
+
+function fmtOdds(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return "-110";
+  const rounded = Math.round(n);
+  return rounded > 0 ? `+${rounded}` : String(rounded);
+}
+
+function getTeamColors(abbr) {
+  const upper = String(abbr || "").toUpperCase().trim();
+  return TEAM_COLORS[upper] || DEFAULT_TEAM_COLORS;
+}
+
+export function renderTeamLogo(abbr) {
+  const upper = String(abbr || "").toUpperCase().trim();
+  if (!upper) return "";
+  const [primary, secondary] = getTeamColors(upper);
+  return `<span class="team-crest" style="--team-color:${primary};--team-secondary:${secondary}"><img class="team-logo" src="https://assets.nhle.com/logos/nhl/svg/${esc(
+    upper
+  )}_dark.svg" alt="${esc(
+    upper
+  )}" loading="lazy" onerror="this.style.display='none'" /><span class="team-Initials">${esc(
+    upper
+  )}</span></span>`;
+}
+
 function badge(label) {
   const classes = {
     CONFIRMED: "badge-confirmed",
@@ -80,8 +152,39 @@ export function isReportStale(
   return nowMs - parsed > maxHours * 3600 * 1000;
 }
 
-export function renderHeader(report, { nowMs = Date.now() } = {}) {
-  const summary = report?.team_summary ?? {};
+export function resolveActiveTeam(report, teamIndex = 0) {
+  if (Array.isArray(report?.teams) && report.teams.length > 0) {
+    const idx = Math.max(
+      0,
+      Math.min(Number(teamIndex) || 0, report.teams.length - 1)
+    );
+    const t = report.teams[idx] || {};
+    return {
+      team_key: t.team_key || `team_${idx + 1}`,
+      team_summary: t.team_summary || report?.team_summary || {},
+      roster: t.roster || [],
+      recommendation:
+        t.recommendation !== undefined
+          ? t.recommendation
+          : report?.recommendation || null,
+      waiver_targets: t.waiver_targets || report?.free_agents || [],
+    };
+  }
+  return {
+    team_key: "team_1",
+    team_summary: report?.team_summary || {},
+    roster: report?.roster || [],
+    recommendation: report?.recommendation || null,
+    waiver_targets: report?.free_agents || [],
+  };
+}
+
+export function renderHeader(
+  report,
+  { nowMs = Date.now(), teamIndex = 0 } = {}
+) {
+  const activeTeam = resolveActiveTeam(report, teamIndex);
+  const summary = activeTeam.team_summary ?? {};
   const initials = esc(summary.team_initials || "PL");
   const teamName = esc(summary.team_name || "PuckLuck");
   const leagueName = esc(summary.league_name || "");
@@ -89,23 +192,49 @@ export function renderHeader(report, { nowMs = Date.now() } = {}) {
   const used = Number(summary.adds_used ?? 0);
   const addsLeft = Number.isFinite(limit) ? Math.max(0, limit - used) : 0;
   const matchup = esc(summary.matchup_score || "");
+  const slateDate = esc(report?.active_slate_date || "");
 
   const staleHours = Number(report?.stale_after_hours) || STALE_THRESHOLD_HOURS;
   const stale = isReportStale(report?.generated_at, nowMs, staleHours);
-  const banner = stale
-    ? `<div class="stale-banner">STALE DATA</div>`
-    : "";
+  const banner = stale ? `<div class="stale-banner">STALE DATA</div>` : "";
+
+  const teams = Array.isArray(report?.teams) ? report.teams : [];
+  const activeIdx =
+    teams.length > 0
+      ? Math.max(0, Math.min(Number(teamIndex) || 0, teams.length - 1))
+      : 0;
+  const switcherHtml =
+    teams.length > 1
+      ? `<div class="team-switcher" role="tablist" aria-label="Fantasy Teams">${teams
+          .map((t, i) => {
+            const ts = t?.team_summary || {};
+            const tName = esc(ts.team_name || `Team ${i + 1}`);
+            const lName = esc(ts.league_name || "");
+            return `<button type="button" class="team-switch-btn${
+              i === activeIdx ? " active" : ""
+            }" data-team-index="${i}">
+        <span class="ts-name">${tName}</span>
+        ${lName ? `<span class="ts-league">${lName}</span>` : ""}
+      </button>`;
+          })
+          .join("")}</div>`
+      : "";
 
   return `<header class="pl-header">
-  <div class="pl-avatar">${initials}</div>
-  <div class="pl-team-meta">
-    <span class="pl-team-name">${teamName}</span>
-    <span class="pl-league-name">${leagueName}</span>
+  <div class="pl-header-top">
+    <div class="pl-avatar">${initials}</div>
+    <div class="pl-team-meta">
+      <span class="pl-team-name">${teamName}</span>
+      <span class="pl-league-name">${leagueName}</span>
+    </div>
+    <div class="pl-header-pills">
+      <span class="pill">Adds Left: <strong>${addsLeft}/${fmtInt(limit)}</strong></span>
+      ${matchup ? `<span class="pill pill-matchup">${matchup}</span>` : ""}
+      ${slateDate ? `<span class="pill pill-slate">Slate: <strong>${slateDate}</strong></span>` : ""}
+      <button type="button" class="pill pill-live" id="sync-now-btn" title="Refresh report now"><span class="live-dot"></span>LIVE · 5m Sync</button>
+    </div>
   </div>
-  <div class="pl-header-pills">
-    <span class="pill">Adds Left: <strong>${addsLeft}/${fmtInt(limit)}</strong></span>
-    ${matchup ? `<span class="pill">${matchup}</span>` : ""}
-  </div>
+  ${switcherHtml}
   ${banner}
 </header>`;
 }
@@ -119,24 +248,52 @@ export function renderRosterTab(roster = []) {
   const rows = [...roster]
     .sort((a, b) => slotRank(a.selected_slot) - slotRank(b.selected_slot))
     .map((p) => {
-      const sub = [p.team_abbr, p.opponent_abbr && `vs ${p.opponent_abbr}`]
+      const [primary] = getTeamColors(p.team_abbr);
+      const subParts = [
+        p.position,
+        p.team_abbr,
+        p.opponent_abbr && `vs ${p.opponent_abbr}`,
+      ]
         .filter(Boolean)
-        .map(esc)
-        .join(" · ");
-      return `<div class="roster-row">
+        .map(esc);
+      const defRtg = Number(p.opp_def_rtg_rel);
+      const defPill =
+        Number.isFinite(defRtg) && defRtg !== 0
+          ? `<span class="def-pill ${defRtg > 0 ? "def-soft" : "def-tough"}">DefRtg ${fmtSigned1(defRtg)}</span>`
+          : "";
+      const hits = Number(p.hits);
+      const blocks = Number(p.blocks);
+      const extraStats = [
+        Number.isFinite(hits) && hits > 0
+          ? `<span>HIT <b>${fmtInt(hits)}</b></span>`
+          : "",
+        Number.isFinite(blocks) && blocks > 0
+          ? `<span>BLK <b>${fmtInt(blocks)}</b></span>`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("");
+
+      return `<div class="roster-row" style="--team-color:${primary}">
   <div class="slot-chip">${esc(p.selected_slot || p.position || "–")}</div>
-  <div>
-    <div class="player-name">${esc(p.display_name)}${goalieBadge(
-        p.goalie_status
-      )}</div>
-    <div class="player-sub">${esc(p.position || "")}${
-        sub ? " · " + sub : ""
-      }</div>
+  <div class="roster-main">
+    <div class="player-head">
+      ${renderTeamLogo(p.team_abbr)}
+      <div class="player-title-wrap">
+        <div class="player-name">${esc(p.display_name)}${goalieBadge(
+          p.goalie_status
+        )}</div>
+        <div class="player-sub">${subParts.join(" · ")}${
+          defPill ? " " + defPill : ""
+        }</div>
+      </div>
+    </div>
     <div class="stat-line">
       <span>SOG <b>${fmtInt(p.shots_on_goal)}</b></span>
       <span>iXG <b>${fmt2(p.ixg)}</b></span>
       <span>G <b>${fmtInt(p.goals)}</b></span>
       <span>A <b>${fmtInt(p.assists)}</b></span>
+      ${extraStats}
     </div>
   </div>
   <div class="fp-col">${fmt1(p.projected_fp)}<small>proj FP</small></div>
@@ -149,18 +306,87 @@ export function renderRosterTab(roster = []) {
 </section>`;
 }
 
-export function renderAddDropTab(recommendation, { stale = false } = {}) {
+function renderWaiverRow(p) {
+  const [primary] = getTeamColors(p.team_abbr);
+  const ixg60 = Number(p.ixg_per60_ewma || 0);
+  const icorsi60 = Number(p.icorsi_per60_ewma || 0);
+  const pp1 = Number(p.pp_toi_share_ewma || 0);
+  const ixgPct = Math.min(100, Math.max(6, Math.round((ixg60 / 1.2) * 100)));
+  const corsiPct = Math.min(100, Math.max(6, Math.round((icorsi60 / 18) * 100)));
+  const ppPct = Math.min(100, Math.max(4, Math.round(pp1 * 100)));
+  const oppPart = p.opponent_abbr ? ` · vs ${esc(p.opponent_abbr)}` : "";
+
+  return `<div class="fa-row" style="--team-color:${primary}">
+  <div class="fa-main">
+    <div class="player-head">
+      ${renderTeamLogo(p.team_abbr)}
+      <div class="player-title-wrap">
+        <div class="player-name">${esc(p.display_name)}</div>
+        <div class="player-sub">${esc(p.position || "")} · ${esc(
+          p.team_abbr || ""
+        )}${oppPart} · ${fmt1(p.percent_owned)}% owned</div>
+      </div>
+    </div>
+    <div class="fa-metrics">
+      <span class="metric-chip">iXG/60 <b>${fmt2(ixg60)}</b><i class="mini-bar"><i style="width:${ixgPct}%"></i></i></span>
+      <span class="metric-chip">iCorsi/60 <b>${fmt2(icorsi60)}</b><i class="mini-bar"><i style="width:${corsiPct}%"></i></i></span>
+      <span class="metric-chip">PP1 <b>${fmt2(pp1)}</b><i class="mini-bar"><i style="width:${ppPct}%"></i></i></span>
+      <span class="metric-chip">proj FP <b>${fmt1(p.projected_fp)}</b></span>
+    </div>
+  </div>
+  <div class="fp-col">${fmt1(p.projected_fp)}<small>proj FP</small></div>
+</div>`;
+}
+
+function filterAndRankWaivers(list = [], query = "") {
+  const q = String(query || "").toLowerCase().trim();
+  return [...list]
+    .filter(
+      (p) =>
+        !q ||
+        String(p.display_name || "")
+          .toLowerCase()
+          .includes(q) ||
+        String(p.team_abbr || "")
+          .toLowerCase()
+          .includes(q) ||
+        String(p.position || "")
+          .toLowerCase()
+          .includes(q)
+    )
+    .sort(
+      (a, b) =>
+        Number(b.ixg_per60_ewma || 0) - Number(a.ixg_per60_ewma || 0)
+    );
+}
+
+export function renderAddDropTab(
+  recommendation,
+  { stale = false, waiverTargets = [], query = "" } = {}
+) {
+  const rankedWaivers = filterAndRankWaivers(waiverTargets, query);
+  const waiverRows = rankedWaivers.map(renderWaiverRow).join("");
+  const waiverSection = `<div class="waiver-connected-block">
+    <div class="section-title">Available Waiver Streamers for This Team</div>
+    <input class="fa-search" id="waiver-search" type="search" placeholder="Search waiver targets by player, team, or position..." value="${esc(
+      query
+    )}" />
+    ${waiverRows || `<div class="player-sub">No waiver streamers match.</div>`}
+  </div>`;
+
   if (!recommendation) {
     return `<section class="tab-panel" data-panel="adddrop">
   <div class="section-title">Streaming Solver</div>
   <div class="adddrop-card"><div class="player-sub">No recommendation today.</div></div>
+  ${waiverSection}
 </section>`;
   }
+
   const action = String(recommendation.action || "");
   const actionBadge =
-    action === "RECOMMEND_SWAP"
+    action === "RECOMMEND_SWAP" || action === "RECOMMEND_ADD"
       ? badge("RECOMMEND_ADD")
-      : action === "HOLD_ASSET"
+      : action === "HOLD_ASSET" || action === "HOLD"
         ? badge("HOLD")
         : badge(action || "HOLD");
   const staleAttrs = stale ? ` stale-disabled" data-stale="true` : "";
@@ -172,15 +398,29 @@ export function renderAddDropTab(recommendation, { stale = false } = {}) {
     .map(esc)
     .join(" ↔ ");
 
+  const shortGain = Math.max(0, Number(recommendation.short_term_gain || 0));
+  const depMag = Math.abs(Number(recommendation.asset_depreciation_penalty || 0));
+  const totalSpan = Math.max(1, shortGain + depMag);
+  const gainPct = Math.round((shortGain / totalSpan) * 100);
+  const depPct = 100 - gainPct;
+
   return `<section class="tab-panel" data-panel="adddrop">
   <div class="section-title">Streaming Solver</div>
   <article class="adddrop-card${staleAttrs}">
     ${staleNotice}
     <div class="adddrop-head">
-      <span class="player-name">${pair || "Streaming decision"}</span>
+      <div class="adddrop-pair">
+        ${recommendation.streamer_team ? renderTeamLogo(recommendation.streamer_team) : ""}
+        <span class="player-name">${pair || "Streaming decision"}</span>
+        ${recommendation.drop_team ? renderTeamLogo(recommendation.drop_team) : ""}
+      </div>
       ${actionBadge}
     </div>
     <div class="adddrop-explanation">${esc(recommendation.explanation)}</div>
+    <div class="solver-comp-bar" title="Short-term streaming gain vs multi-week asset depreciation">
+      <div class="comp-gain" style="width:${gainPct}%"></div>
+      <div class="comp-loss" style="width:${depPct}%"></div>
+    </div>
     <details class="math-drawer">
       <summary>Multi-week net math</summary>
       <div class="math-row"><span>Tonight gain</span><span>${fmtSigned1(
@@ -199,6 +439,20 @@ export function renderAddDropTab(recommendation, { stale = false } = {}) {
       )} FP</b></span></div>
     </details>
   </article>
+  ${waiverSection}
+</section>`;
+}
+
+export function renderFreeAgentsTab(freeAgents = [], { query = "" } = {}) {
+  const rows = filterAndRankWaivers(freeAgents, query)
+    .map(renderWaiverRow)
+    .join("");
+  return `<section class="tab-panel" data-panel="agents">
+  <div class="section-title">Waiver Pool</div>
+  <input class="fa-search" id="fa-search" type="search" placeholder="Search free agents" value="${esc(
+    query
+  )}" />
+  ${rows || `<div class="player-sub">No free agents match.</div>`}
 </section>`;
 }
 
@@ -212,6 +466,8 @@ export function renderGameTotalsTab(games = []) {
     .map((g) => {
       const postponed =
         String(g.status || "").toUpperCase() === "POSTPONED";
+      const [awayColor] = getTeamColors(g.away_abbr);
+      const [homeColor] = getTeamColors(g.home_abbr);
       const evBadge =
         g.is_positive_ev === true && !postponed ? badge("+EV") : "";
       const statusBadge = postponed
@@ -221,20 +477,57 @@ export function renderGameTotalsTab(games = []) {
           : "";
       const time = String(g.start_time_utc || "").slice(11, 16);
       const goalies = [
-        `${esc(g.home_abbr)} ${goalieBadge(g.home_goalie_status)}`,
         `${esc(g.away_abbr)} ${goalieBadge(g.away_goalie_status)}`,
+        `${esc(g.home_abbr)} ${goalieBadge(g.home_goalie_status)}`,
       ].join(" · ");
+
+      const expTotal = Number(g.expected_total || 0);
+      const lamAway = Number.isFinite(Number(g.lambda_away))
+        ? Number(g.lambda_away)
+        : expTotal * 0.48;
+      const lamHome = Number.isFinite(Number(g.lambda_home))
+        ? Number(g.lambda_home)
+        : Math.max(0, expTotal - lamAway);
+      const lamSum = Math.max(0.1, lamAway + lamHome);
+      const awayShare = Math.round((lamAway / lamSum) * 100);
+      const homeShare = 100 - awayShare;
+      const probOverPct = Math.round(Number(g.prob_over || 0) * 100);
+
+      const bestPickBanner =
+        g.is_positive_ev === true && !postponed
+          ? `<div class="ev-pick-banner">BEST PICK: <strong>${esc(
+              g.best_side || "OVER"
+            )} ${fmt1(g.line)}</strong> (${fmtSignedPct(g.ev)} EV)</div>`
+          : "";
+
       const metrics = postponed
         ? ""
-        : `<div class="game-metrics">
+        : `<div class="lambda-split" style="--away-color:${awayColor};--home-color:${homeColor}">
+    <div class="lambda-labels">
+      <span>${esc(g.away_abbr)} λ <b>${fmt2(lamAway)}</b></span>
+      <span>P(Over) <b>${probOverPct}%</b></span>
+      <span>${esc(g.home_abbr)} λ <b>${fmt2(lamHome)}</b></span>
+    </div>
+    <div class="lambda-bar">
+      <span class="lambda-away" style="width:${awayShare}%"></span>
+      <span class="lambda-home" style="width:${homeShare}%"></span>
+    </div>
+  </div>
+  <div class="game-metrics">
     <span>Model <b>${fmt1(g.expected_total)}</b></span>
     <span>Line <b>${fmt1(g.line)}</b></span>
     <span>P(Over) <b>${fmt2(g.prob_over)}</b></span>
+    <span>O ${fmtOdds(g.over_odds)} / U ${fmtOdds(g.under_odds)}</span>
     ${evBadge}
-  </div>`;
+  </div>
+  ${bestPickBanner}`;
+
       return `<article class="game-card">
+  <div class="game-card-accent" style="--away-color:${awayColor};--home-color:${homeColor}"></div>
   <div class="game-top">
-    <span class="game-teams">${esc(g.away_abbr)} @ ${esc(
+    <span class="game-teams">${renderTeamLogo(g.away_abbr)} ${esc(
+      g.away_abbr
+    )} <span class="at-sep">@</span> ${renderTeamLogo(g.home_abbr)} ${esc(
         g.home_abbr
       )}</span>
     <span class="game-time">${esc(time)} UTC ${statusBadge}</span>
@@ -250,64 +543,181 @@ export function renderGameTotalsTab(games = []) {
 </section>`;
 }
 
-export function renderFreeAgentsTab(freeAgents = [], { query = "" } = {}) {
-  const q = String(query || "").toLowerCase();
-  const rows = [...freeAgents]
-    .filter(
-      (p) =>
-        !q ||
+export function renderPointScorersTab(
+  pointScorers = [],
+  { query = "", filter = "ALL" } = {}
+) {
+  const q = String(query || "").toLowerCase().trim();
+  const activeFilter = SCORER_FILTERS.includes(String(filter).toUpperCase())
+    ? String(filter).toUpperCase()
+    : "ALL";
+
+  const filtered = [...pointScorers]
+    .filter((p) => {
+      if (activeFilter === "+EV" && p.is_positive_ev !== true) return false;
+      if (!q) return true;
+      return (
         String(p.display_name || "")
           .toLowerCase()
           .includes(q) ||
         String(p.team_abbr || "")
           .toLowerCase()
           .includes(q) ||
+        String(p.opponent_abbr || "")
+          .toLowerCase()
+          .includes(q) ||
         String(p.position || "")
           .toLowerCase()
           .includes(q)
-    )
-    .sort(
-      (a, b) =>
-        Number(b.ixg_per60_ewma || 0) - Number(a.ixg_per60_ewma || 0)
-    )
-    .map((p) => `<div class="fa-row">
-  <div>
-    <div class="player-name">${esc(p.display_name)}</div>
-    <div class="player-sub">${esc(p.position || "")} · ${esc(
-      p.team_abbr || ""
-    )} · ${fmt1(p.percent_owned)}% owned</div>
-    <div class="fa-metrics">
-      <span>iXG/60 <b>${fmt2(p.ixg_per60_ewma)}</b></span>
-      <span>iCorsi/60 <b>${fmt2(p.icorsi_per60_ewma)}</b></span>
-      <span>PP1 <b>${fmt2(p.pp_toi_share_ewma)}</b></span>
-      <span>proj FP <b>${fmt1(p.projected_fp)}</b></span>
+      );
+    })
+    .sort((a, b) => {
+      if (activeFilter === "GOALS") {
+        return (
+          Number(b.prob_goal || 0) - Number(a.prob_goal || 0) ||
+          Number(b.best_prop_ev || 0) - Number(a.best_prop_ev || 0)
+        );
+      }
+      if (activeFilter === "ASSISTS") {
+        return (
+          Number(b.prob_assist || 0) - Number(a.prob_assist || 0) ||
+          Number(b.best_prop_ev || 0) - Number(a.best_prop_ev || 0)
+        );
+      }
+      if (activeFilter === "+EV") {
+        return (
+          Number(b.best_prop_ev || 0) - Number(a.best_prop_ev || 0) ||
+          Number(b.prob_point || 0) - Number(a.prob_point || 0)
+        );
+      }
+      return (
+        Number(b.prob_point || 0) - Number(a.prob_point || 0) ||
+        Number(b.best_prop_ev || 0) - Number(a.best_prop_ev || 0)
+      );
+    });
+
+  const filterBar = `<div class="scorer-controls">
+    <input class="fa-search" id="scorer-search" type="search" placeholder="Search skaters by name, team, or matchup..." value="${esc(
+      query
+    )}" />
+    <div class="scorer-filter-bar" role="group" aria-label="Scorer Filters">
+      ${SCORER_FILTERS.map(
+        (f) =>
+          `<button type="button" class="scorer-filter-btn${
+            f === activeFilter ? " active" : ""
+          }" data-scorer-filter="${f}">${esc(f)}</button>`
+      ).join("")}
+    </div>
+  </div>`;
+
+  const rows = filtered
+    .map((p) => {
+      const [primary] = getTeamColors(p.team_abbr);
+      const probPtPct = Math.round(Number(p.prob_point || 0) * 100);
+      const probGoalPct = Math.round(Number(p.prob_goal || 0) * 100);
+      const probAstPct = Math.round(Number(p.prob_assist || 0) * 100);
+      const projPts =
+        p.projected_points !== undefined
+          ? p.projected_points
+          : Number(p.projected_goals || 0) + Number(p.projected_assists || 0);
+
+      const evBadge = p.is_positive_ev === true ? badge("+EV") : "";
+      const profitBanner =
+        p.is_positive_ev === true
+          ? `<div class="scorer-ev-banner">PROFIT EDGE: <strong>${esc(
+              p.best_prop_market || "1+ Point"
+            )} ${fmtOdds(p.best_prop_odds)}</strong> (${fmtSignedPct(
+              p.best_prop_ev
+            )} EV · Fair ${fmtOdds(p.fair_point_odds || p.fair_goal_odds)})</div>`
+          : "";
+
+      return `<div class="scorer-row${
+        p.is_positive_ev === true ? " scorer-row-ev" : ""
+      }" style="--team-color:${primary}">
+  <div class="scorer-top">
+    <div class="player-head">
+      ${renderTeamLogo(p.team_abbr)}
+      <div class="player-title-wrap">
+        <div class="player-name">${esc(p.display_name)}${evBadge}</div>
+        <div class="player-sub">${esc(p.position || "F")} · ${esc(
+          p.team_abbr || ""
+        )}${p.opponent_abbr ? ` vs ${esc(p.opponent_abbr)}` : ""} · SOG <b>${fmt1(
+          p.projected_sog ?? p.shots_on_goal
+        )}</b> · iXG/60 <b>${fmt2(p.ixg_per60_ewma)}</b></div>
+      </div>
+    </div>
+    <div class="fp-col">${fmt2(projPts)}<small>exp Pts</small></div>
+  </div>
+  <div class="scorer-prob-grid">
+    <div class="prob-pill">
+      <div class="prob-pill-top"><span>1+ Pt: <b>${probPtPct}%</b></span><span class="odds-tag">(${fmtOdds(
+        p.market_point_odds
+      )})</span></div>
+      <div class="prob-bar"><div class="prob-fill" style="width:${Math.min(
+        100,
+        probPtPct
+      )}%"></div></div>
+    </div>
+    <div class="prob-pill">
+      <div class="prob-pill-top"><span>Goal: <b>${probGoalPct}%</b></span><span class="odds-tag">(${fmtOdds(
+        p.market_goal_odds
+      )})</span></div>
+      <div class="prob-bar"><div class="prob-fill prob-fill-goal" style="width:${Math.min(
+        100,
+        probGoalPct
+      )}%"></div></div>
+    </div>
+    <div class="prob-pill">
+      <div class="prob-pill-top"><span>Assist: <b>${probAstPct}%</b></span><span class="odds-tag">(${fmtOdds(
+        p.market_assist_odds
+      )})</span></div>
+      <div class="prob-bar"><div class="prob-fill prob-fill-assist" style="width:${Math.min(
+        100,
+        probAstPct
+      )}%"></div></div>
     </div>
   </div>
-</div>`)
+  ${profitBanner}
+</div>`;
+    })
     .join("");
-  return `<section class="tab-panel" data-panel="agents">
-  <div class="section-title">Waiver Pool</div>
-  <input class="fa-search" id="fa-search" type="search" placeholder="Search free agents" value="${esc(
-    query
-  )}" />
-  ${rows || `<div class="player-sub">No free agents match.</div>`}
+
+  return `<section class="tab-panel" data-panel="scorers">
+  <div class="section-title">Point Scorers &amp; Prop Edges</div>
+  ${filterBar}
+  ${rows || `<div class="player-sub">No point scorers match current filter.</div>`}
 </section>`;
 }
 
 export function renderDashboard(
   report,
-  { nowMs = Date.now(), activeTab = "roster", query = "" } = {}
+  {
+    nowMs = Date.now(),
+    activeTab = "roster",
+    teamIndex = 0,
+    query = "",
+    scorerQuery = "",
+    scorerFilter = "ALL",
+  } = {}
 ) {
   const stale = isReportStale(
     report?.generated_at,
     nowMs,
     Number(report?.stale_after_hours) || STALE_THRESHOLD_HOURS
   );
+  const activeTeam = resolveActiveTeam(report, teamIndex);
   const panels = [
-    renderRosterTab(report?.roster || []),
-    renderAddDropTab(report?.recommendation, { stale }),
+    renderRosterTab(activeTeam.roster),
+    renderAddDropTab(activeTeam.recommendation, {
+      stale,
+      waiverTargets: activeTeam.waiver_targets,
+      query,
+    }),
     renderGameTotalsTab(report?.games || []),
-    renderFreeAgentsTab(report?.free_agents || [], { query }),
+    renderPointScorersTab(report?.point_scorers || [], {
+      query: scorerQuery,
+      filter: scorerFilter,
+    }),
   ];
   const panelHtml = panels
     .map((html, i) =>
@@ -323,7 +733,7 @@ export function renderDashboard(
   ).join("");
 
   return `<div class="pl-dashboard">
-${renderHeader(report, { nowMs })}
+${renderHeader(report, { nowMs, teamIndex })}
 <main class="pl-main">${panelHtml}</main>
 <nav class="bottom-nav">${nav}</nav>
 </div>`;
@@ -333,45 +743,90 @@ ${renderHeader(report, { nowMs })}
 
 if (typeof document !== "undefined") {
   let report = null;
+  let state = {
+    activeTab: "roster",
+    teamIndex: 0,
+    query: "",
+    scorerQuery: "",
+    scorerFilter: "ALL",
+  };
 
-  const mount = (query = "") => {
+  const fetchLatestReport = async () => {
+    try {
+      const resp = await fetch("./report.json", { cache: "no-store" });
+      if (resp.ok) {
+        report = await resp.json();
+      }
+    } catch {
+      if (!report) report = {};
+    }
+  };
+
+  const mount = (focusId = null) => {
     const root = document.getElementById("app");
-    const active =
-      document.querySelector(".nav-btn.active")?.dataset.tab || "roster";
-    root.innerHTML = renderDashboard(report, { activeTab: active, query });
+    if (!root) return;
+    root.innerHTML = renderDashboard(report || {}, state);
+
     document.querySelectorAll(".nav-btn").forEach((btn) =>
       btn.addEventListener("click", () => {
-        document
-          .querySelectorAll(".nav-btn")
-          .forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        document
-          .querySelectorAll(".tab-panel")
-          .forEach((p) => p.classList.remove("active"));
-        document
-          .querySelector(`[data-panel="${btn.dataset.tab}"]`)
-          ?.classList.add("active");
+        state.activeTab = btn.dataset.tab || "roster";
+        mount();
       })
     );
-    document.getElementById("fa-search")?.addEventListener("input", (e) => {
-      mount(e.target.value);
-      const input = document.getElementById("fa-search");
+
+    document.querySelectorAll(".team-switch-btn").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        state.teamIndex = Number(btn.dataset.teamIndex) || 0;
+        mount();
+      })
+    );
+
+    document.querySelectorAll(".scorer-filter-btn").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        state.scorerFilter = btn.dataset.scorerFilter || "ALL";
+        mount();
+      })
+    );
+
+    document
+      .getElementById("waiver-search")
+      ?.addEventListener("input", (e) => {
+        state.query = e.target.value;
+        mount("waiver-search");
+      });
+
+    document
+      .getElementById("scorer-search")
+      ?.addEventListener("input", (e) => {
+        state.scorerQuery = e.target.value;
+        mount("scorer-search");
+      });
+
+    document
+      .getElementById("sync-now-btn")
+      ?.addEventListener("click", async () => {
+        await fetchLatestReport();
+        mount();
+      });
+
+    if (focusId) {
+      const input = document.getElementById(focusId);
       input?.focus();
-      input?.setSelectionRange(input.value.length, input.value.length);
-    });
+      const len = input?.value?.length || 0;
+      input?.setSelectionRange(len, len);
+    }
   };
 
   document.addEventListener("DOMContentLoaded", async () => {
-    try {
-      const resp = await fetch("./report.json", { cache: "no-store" });
-      report = await resp.json();
-    } catch {
-      report = {};
-    }
+    await fetchLatestReport();
     mount();
+    setInterval(async () => {
+      await fetchLatestReport();
+      mount();
+    }, AUTO_REFRESH_INTERVAL_MS);
   });
 
-  if ("serviceWorker" in navigator) {
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   }
 }
