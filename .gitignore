@@ -1,0 +1,25 @@
+# Secrets — NEVER commit (SRS §7.1)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local data warehouse & caches (generated; SRS §3.2)
+data/*.sqlite3
+data/*.sqlite3-*
+data/cache/
+
+# Generated static export (published via gh-pages branch only)
+dist/report.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+node_modules/

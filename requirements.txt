@@ -1,0 +1,14 @@
+# PuckLuck runtime dependencies (Python 3.11+)
+pandas>=2.1
+pyarrow>=14.0
+
+# Phase 2+ (Yahoo OAuth, NHL API, local API server) — declared now so the
+# pinned environment stays stable as later phases land.
+requests>=2.31
+fastapi>=0.110
+uvicorn>=0.29
+python-dotenv>=1.0
+
+# Tooling / verification
+pytest>=8.0
+black>=24.0

@@ -1,0 +1,61 @@
+# PuckLuck Workflows & Testing
+
+## Verification by Subsystem
+
+| Scope                        | Command                                        |
+|------------------------------|------------------------------------------------|
+| All Python unit tests        | `.venv/bin/python -m pytest`                   |
+| Single file                  | `.venv/bin/python -m pytest tests/test_db.py`  |
+| Formatting (check)           | `.venv/bin/black --check .`                    |
+| Formatting (apply)           | `.venv/bin/black .`                            |
+| Frontend policy tests        | `node --test web/tests/` (Phase 5)             |
+
+All three gates from SRS §8 must be green before merging a phase:
+pytest (offline), black (100%), node --test (once `web/` exists).
+
+## Offline Discipline
+
+`conftest.py` autouse-patches `socket.socket`, `socket.create_connection`,
+and `socket.getaddrinfo` to raise `NetworkAccessBlocked`. Code under test
+must never open sockets directly:
+
+- **MoneyPuck:** inject `fetcher` into `update_cache()` — a callable
+  `(url: str) -> bytes`. Tests return canned CSV bytes.
+- **Yahoo/NHL (Phase 2):** same pattern — a transport seam returning
+  response objects/bytes; stub it in fixtures, never patch `requests`.
+
+## Test Conventions
+
+- DB tests use `db.init_db(":memory:")`; file-backed tests use pytest's
+  `tmp_path`.
+- Seed parents before facts: `fact_*` tables enforce FKs to
+  `dim_players`/`dim_teams` (insert helpers `upsert_player`,
+  `upsert_team`, `insert_skater_game`, `insert_goalie_game`,
+  `insert_market_line`).
+- Synthetic fixtures only — small inline CSVs/dicts, no real downloads.
+- Cache-freshness tests: `os.utime` the parquet mtime into the past, or
+  pass `max_age_hours=0`.
+
+## Daily Operations (Phase 5)
+
+`com.puckluck.refresh.plist` LaunchAgent, 06:00 America/Edmonton:
+
+```bash
+launchctl load   ~/Library/LaunchAgents/com.puckluck.refresh.plist
+launchctl start  com.puckluck.refresh           # manual run
+launchctl unload ~/Library/LaunchAgents/com.puckluck.refresh.plist
+tail -f data/logs/refresh.log                   # stdout/stderr sink
+```
+
+Pipeline order: refresh Yahoo OAuth → pull rosters/settings → MoneyPuck
+`update_cache()` → NHL boxscores → fit component ridges on `t < today` →
+add/drop solver + Poisson totals → export allowlisted `dist/report.json`
+→ push `gh-pages`.
+
+## Runbooks
+
+Atomic implementation prompts live in `docs/runbooks/<FEATURE>.md`
+(SRS §8.1). Each names the 2–3 readable files, protected files, exact
+signatures, and deterministic test fixtures.
+
+- `docs/runbooks/PHASE_2_INGESTION.md` — Phase 2: Yahoo OAuth 2.0 (`ingestion/yahoo.py`) + Official NHL API (`ingestion/nhl.py`)
