@@ -398,7 +398,7 @@ Before writing any application code in the new repository, Agent 1 MUST initiali
   - Implement SQLite v2 schema in `db.py`.
   - Build NHL-to-Yahoo player crosswalk resolver.
   - Implement MoneyPuck automated CSV ingestion pipeline.
-- [ ] **Phase 2: Yahoo Fantasy Integration**
+- [x] **Phase 2: Yahoo Fantasy Integration**
   - Implement headless OAuth 2.0 handshake and token persistence.
   - Ingest user rosters, active lineup slots, and league scoring categories.
 - [ ] **Phase 3: Statistical Modeling & Feature Pipeline**

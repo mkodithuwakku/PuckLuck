@@ -71,3 +71,15 @@ MoneyPuck bulk CSV/parquet ┘                     │
   `CrosswalkResolver`: exact → position-disambiguated → first-name alias
   → fuzzy (ratio ≥ 0.88). `attach()` clears any prior Yahoo key first, so
   re-linking never violates the UNIQUE constraint.
+- **Yahoo (`ingestion/yahoo.py`):** OAuth 2.0 (`OAuthTokens`, `YahooClient`,
+  `persist_refresh_token`) with injectable `TokenTransport` / `ApiTransport`.
+  Pure parsers (`parse_league_settings`, `parse_roster`, `parse_free_agents`)
+  normalize Yahoo's nested `fantasy_content` payloads into `LeagueSettings`
+  (`YAHOO_STAT_ID_MAP`) and `YahooPlayer`, and `sync_players_to_db` links
+  identities via `CrosswalkResolver`.
+- **NHL API (`ingestion/nhl.py`):** Public REST via injectable `JsonFetcher`.
+  `fetch_schedule` returns `ScheduledGame` rows for a target date;
+  `ingest_team_roster` upserts `dim_players`; `ingest_boxscore` upserts
+  `dim_teams` (with `TEAM_ALTITUDE_FT` and away-venue preservation), computes
+  `compute_rest_days` (`game_date < target_date`), and populates
+  `fact_skater_games` and `fact_goalie_games` (skipping `00:00` backups).
