@@ -414,3 +414,5 @@ Before writing any application code in the new repository, Agent 1 MUST initiali
 - [x] **Phase 6: End-to-End Warehouse Orchestration, Yahoo-Optional Mode & Live Server Mount**
   - Wire `scripts/refresh.py` to execute the full warehouse-to-report pipeline (`FeatureBuilder` → `ComponentRidgeModel` → `ScoringRescorer` → `solve_best_stream` + `price_total_goals` → `dist/report.json`) with Yahoo-optional fallback (`DEFAULT_STAT_WEIGHTS` + `--demo` warehouse seeder).
   - Mount `web/` static assets and `/report.json` on `api/server.py` so `http://127.0.0.1:8877/` serves the live interactive PWA out of the box.
+- [ ] **Phase 7: Live NHL Slate & Real-Life Daily Player Projections (`--live`)**
+  - Wire `scripts/refresh.py --live` to pull today's real NHL schedule, active rosters, recent boxscores, and MoneyPuck process metrics, projecting points specifically for players on tonight's active NHL slate.
