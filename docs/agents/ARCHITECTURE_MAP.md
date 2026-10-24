@@ -93,3 +93,10 @@ MoneyPuck bulk CSV/parquet ┘                     │
   (`SOG, iXG, G, A, BLK, HIT`) with nonnegative clamping; `ScoringRescorer`
   maps components through league weights; `evaluate_swap` /
   `solve_best_stream` enforce the $H$-week asset-depreciation gate.
+- **Betting Engine (`betting/poisson.py`, `betting/ev.py`):**
+  `compute_expected_goals` and `price_total_goals` evaluate the $[0, 15]^2$
+  bivariate Poisson grid with goalie `GSAx/60` suppression (`1 - GSAx/60 / 3`)
+  and $+0.22$ unconfirmed-goalie penalty; `evaluate_total_market` and
+  `screen_positive_ev` enforce the $+3.5\%$ EV gate while excluding
+  `LOW_LIQUIDITY_BOOKS`, and `upsert_total_line` deduplicates NULL
+  `target_id` rows in `fact_market_lines`.

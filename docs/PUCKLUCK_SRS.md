@@ -405,7 +405,7 @@ Before writing any application code in the new repository, Agent 1 MUST initiali
   - Build `FeatureBuilder` for team pace, possessions, and 15-game EWMA xG.
   - Implement closed-form `ComponentRidge` predictor.
   - Implement the $H$-week asset penalty add/drop solver.
-- [ ] **Phase 4: Game Totals & Betting Evaluator**
+- [x] **Phase 4: Game Totals & Betting Evaluator**
   - Implement Bivariate Poisson simulator.
   - Build consensus line odds parser and $+\text{EV}$ screener.
 - [ ] **Phase 5: Automated Scheduler & Static Dashboard**
