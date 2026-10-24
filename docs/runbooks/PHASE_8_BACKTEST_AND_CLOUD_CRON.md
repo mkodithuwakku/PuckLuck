@@ -1,7 +1,7 @@
-# Runbook: Phase 8 — Bi-Weekly Walk-Forward Backtesting, Self-Tuner & Sleep-Proof Cloud Automation
+# Runbook: Phase 8 — Bi-Weekly Walk-Forward Backtesting, Self-Tuner & GitHub Actions Pages Deployment
 
 **Role:** Agent 2 (Coding / Implementation Agent)  
-**Scope:** Implement `models/backtest.py`, wire `data/model_params.json` + intraday line auto-refresh into `scripts/refresh.py` and `api/server.py`, create sleep-proof GitHub Actions workflows (`.github/workflows/refresh.yml` and `.github/workflows/backtest.yml`) + update `scripts/com.puckluck.refresh.plist` (`RunAtLoad = true`), and add unit tests in `tests/test_backtest.py`.  
+**Scope:** Implement `models/backtest.py`, wire `data/model_params.json` + `--backtest` + `model_health` into `scripts/refresh.py`, create sleep-proof GitHub Actions workflows (`.github/workflows/refresh.yml` and `.github/workflows/backtest.yml`) deploying directly to **GitHub Pages via Actions (`actions/upload-pages-artifact` + `actions/deploy-pages`)**, set `RunAtLoad = true` in `scripts/com.puckluck.refresh.plist`, and add unit tests in `tests/test_backtest.py`.  
 **Protocol (SRS §8.1):** Read ONLY the files listed under **Readable Context**. Do NOT modify protected files. Leave all changes staged (`git add`) and uncommitted for Agent 1 review.
 
 ---
@@ -69,35 +69,38 @@ class BacktestReport:
    - Evaluates strictly out-of-sample walk-forward predictions over distinct `game_date` values in `[as_of_date - window_days, as_of_date)`:
      - For each evaluation date `d` in the window, trains only on rows with `game_date < d` (strict temporal integrity, SRS §8) and predicts games on `d`.
    - Grid-searches `(alpha, l2_penalty)` across `CANDIDATE_EWMA_ALPHAS × CANDIDATE_RIDGE_LAMBDAS` to minimize out-of-sample `fantasy_point_mae`, and grid-searches `base_rate` across `CANDIDATE_BASE_RATES` to minimize `totals_brier_score`.
-   - Generates concrete human-readable `suggestions` (e.g., `"Decrease EWMA alpha from 0.08 to 0.05 (reduces FP MAE by 4.2%)"` or `"Retain baseline parameters (no out-of-sample improvement over window)"`).
+   - Generates concrete human-readable `suggestions` (e.g., `"Update EWMA alpha -> 0.05, Ridge L2 -> 2.5 (reduces out-of-sample FP MAE by 3.8%)"` or `"Retain baseline parameters (optimal across current 14-day walk-forward window)"`).
 
 ---
 
-## 3. Sleep-Proof Cloud Workflows (`.github/workflows/`) & `scripts/refresh.py` Integration
+## 3. Sleep-Proof GitHub Actions Workflows (`.github/workflows/`) & `scripts/refresh.py`
+
+Because GitHub Pages is configured to deploy from **GitHub Actions**, both workflows MUST build a `_site/` directory containing `web/index.html`, `web/styles.css`, `web/app.js`, `web/manifest.webmanifest`, `web/sw.js`, and `dist/report.json` (copied to `_site/report.json`), verify that no `.env` or `.sqlite3` files exist in `_site/`, and deploy via `actions/configure-pages@v5`, `actions/upload-pages-artifact@v3` (`path: _site`), and `actions/deploy-pages@v4`!
 
 1. **`.github/workflows/refresh.yml`:**
-   - Triggers on `schedule` (`cron: '30 12,17,22 * * *'` — morning refresh + pre-game line/pick refreshes in the cloud even when Mac is asleep) and `workflow_dispatch`.
-   - Steps: `actions/checkout@v4`, `actions/setup-python@v5` (`python-version: '3.11'`), `actions/cache@v4` (caching `data/`), `pip install -r requirements.txt`, `python -m scripts.refresh --live`, and deploys `web/` + `dist/report.json` to `gh-pages`.
+   - Triggers on:
+     - `push: branches: [main]` (so pushing to `main` immediately deploys the live site!)
+     - `schedule:` with `cron: '30 12,16,21,23 * * *'` (morning refresh + intraday line/pick updates before puck drop, running in the cloud even when the Mac is asleep)
+     - `workflow_dispatch:`
+   - Top-level permissions: `contents: read`, `pages: write`, `id-token: write`.
+   - Steps: checkout, setup-python `3.11`, `actions/cache@v4` on `data/`, `pip install -r requirements.txt`, `python -m scripts.refresh --live || python -m scripts.refresh --demo`, stage `_site/` (`cp web/index.html web/styles.css web/app.js web/manifest.webmanifest web/sw.js _site/` and `cp dist/report.json _site/report.json`), security check (`! find _site -name '.env*' -o -name '*.sqlite3' | grep -q .`), `actions/configure-pages@v5`, `actions/upload-pages-artifact@v3`, and `actions/deploy-pages@v4`.
 2. **`.github/workflows/backtest.yml`:**
-   - Triggers bi-weekly on `schedule` (`cron: '0 11 1,15 * *'`) and `workflow_dispatch`.
-   - Runs `python -m scripts.refresh --live --backtest`, persists updated `data/model_params.json` in cache, and deploys updated `dist/report.json` to `gh-pages`.
+   - Triggers bi-weekly on `schedule:` (`cron: '0 11 1,15 * *'`) and `workflow_dispatch:`.
+   - Runs `python -m scripts.refresh --live --backtest || python -m scripts.refresh --demo --backtest`, caches updated `data/model_params.json`, and deploys `_site/` via `actions/upload-pages-artifact@v3` + `actions/deploy-pages@v4`.
 3. **`scripts/com.puckluck.refresh.plist`:**
-   - Set `<key>RunAtLoad</key><true/>` so waking the Mac immediately runs a catch-up refresh.
+   - Set `<key>RunAtLoad</key><true/>` and `<key>StartInterval</key><integer>3600</integer>` so local macOS also auto-refreshes lines hourly and immediately upon wake.
 4. **`scripts/refresh.py`:**
-   - Add `"model_health"` to `TOP_LEVEL_ALLOWLIST` with `MODEL_HEALTH_ALLOWLIST = frozenset({"window_start", "window_end", "samples_evaluated", "games_evaluated", "fantasy_point_mae", "totals_brier_score", "ewma_alpha", "ridge_l2_penalty", "poisson_base_rate", "suggestions", "improved_over_baseline"})`.
-   - Load tuned parameters via `load_model_params()` in `run_warehouse_pipeline` (using `params.ewma_alpha`, `params.ridge_l2_penalty`, `params.poisson_base_rate`).
-   - Add `--backtest` CLI flag to `main(argv)` that runs `run_walk_forward_backtest`, saves improved params via `save_model_params`, and attaches `model_health` to the exported report.
+   - Add `"model_health"` to `TOP_LEVEL_ALLOWLIST` with `MODEL_HEALTH_ALLOWLIST = frozenset({"window_start", "window_end", "samples_evaluated", "games_evaluated", "fantasy_point_mae", "totals_brier_score", "ewma_alpha", "ridge_l2_penalty", "poisson_base_rate", "suggestions", "improved_over_baseline"})` (note: inside `model_health`, `suggestions` is a list of strings — ensure `_filter_model_health` and `validate_public_report` allow `suggestions` as a list of strings without failing `_walk_forbidden`!).
+   - Load tuned parameters via `load_model_params()` in `run_warehouse_pipeline` (passing `alpha=params.ewma_alpha` to `FeatureBuilder`, `l2_penalty=params.ridge_l2_penalty` to `ComponentRidgeModel`, and `base_rate=params.poisson_base_rate` to `compute_expected_goals`).
+   - Add `--backtest` CLI flag to `main(argv)` that runs `run_walk_forward_backtest`, saves improved params via `save_model_params`, and includes `model_health` in `build_public_report`.
 
 ---
 
 ## 4. Required Unit Tests (`tests/test_backtest.py`)
 
-1. `test_walk_forward_backtest_evaluates_strictly_out_of_sample_and_suggests_tuning`:
-   - Seeds multi-date synthetic games into an in-memory warehouse, runs `run_walk_forward_backtest`, and verifies `samples_evaluated > 0`, `fantasy_point_mae >= 0`, `0.0 <= totals_brier_score <= 1.0`, `recommended_params.ewma_alpha in CANDIDATE_EWMA_ALPHAS`, and non-empty `suggestions`.
-2. `test_save_and_load_model_params_round_trip(tmp_path: Path)`:
-   - Verifies atomic write and reload of `TunedModelParams`, and verifies `refresh.main(["--demo", "--backtest", ...])` populates `report["model_health"]` passing `validate_public_report`.
-3. `test_github_actions_workflows_and_wake_catchup_plist_exist`:
-   - Verifies `.github/workflows/refresh.yml` and `.github/workflows/backtest.yml` exist and contain `schedule:` / `cron:` triggers, `actions/cache`, and `gh-pages` deployment, and `com.puckluck.refresh.plist` has `RunAtLoad == True`.
+1. `test_walk_forward_backtest_evaluates_strictly_out_of_sample_and_suggests_tuning`
+2. `test_save_and_load_model_params_and_refresh_backtest_flag(tmp_path: Path)`
+3. `test_github_actions_pages_workflows_and_wake_catchup_plist`
 
 ---
 
