@@ -51,8 +51,20 @@ Extend the allowlists in `scripts/refresh.py` so the new multi-team and point-sc
           "pp_toi_share_ewma",
           "prob_point",
           "prob_goal",
+          "prob_assist",
           "fair_point_odds",
           "fair_goal_odds",
+          "fair_assist_odds",
+          "market_point_odds",
+          "market_goal_odds",
+          "market_assist_odds",
+          "point_ev",
+          "goal_ev",
+          "assist_ev",
+          "best_prop_market",
+          "best_prop_odds",
+          "best_prop_ev",
+          "is_positive_ev",
       }
   )
   ```
@@ -102,7 +114,7 @@ Fetches open-source consensus Over/Under lines for `scheduled_games`:
 
 ## 4. Point Scorers & Two-Team Fantasy Pipeline
 
-### 4.1 Point Scorer Probabilities (`compute_point_scorer_projection`)
+### 4.1 Point, Goal & Assist Scorer Probabilities + Consensus Prop +EV Screener (`compute_point_scorer_projection`)
 For each skater playing on `active_slate_date`:
 - Given component predictions `comps` (`G`, `A`, `SOG`, `iXG`) and EWMA features `feats`:
   - `lam_g = max(0.01, float(comps.get("G", 0.0)))`
@@ -110,8 +122,20 @@ For each skater playing on `active_slate_date`:
   - `lam_pts = lam_g + lam_a`
   - `prob_point = round(1.0 - math.exp(-lam_pts), 4)` ($P(\text{Points} \ge 1)$)
   - `prob_goal = round(1.0 - math.exp(-lam_g), 4)` ($P(\text{Goals} \ge 1)$)
-  - Convert `prob_point` and `prob_goal` into fair American odds (`prob_to_fair_american(p: float) -> int`: if `p >= 0.5`, `-int(round(100.0 * p / max(1e-6, 1.0 - p)))`; else `+int(round(100.0 * (1.0 - p) / max(1e-6, p)))`).
-- Sort `point_scorers` descending by `prob_point` (tie-break by `prob_goal`).
+  - `prob_assist = round(1.0 - math.exp(-lam_a), 4)` ($P(\text{Assists} \ge 1)$)
+  - Convert `prob_point`, `prob_goal`, and `prob_assist` into fair American odds (`prob_to_fair_american(p: float) -> int`: if `p >= 0.5`, `-int(round(100.0 * p / max(1e-6, 1.0 - p)))`; else `+int(round(100.0 * (1.0 - p) / max(1e-6, p)))`).
+- **Consensus Player Prop Odds & +EV Profit Screening (`PLAYER_POINTS`, `PLAYER_GOALS`, `PLAYER_ASSISTS`):**
+  - Look up stored consensus player prop lines in `fact_market_lines` for `target_id = str(player_id)` (`market_type` in `{"PLAYER_POINTS", "PLAYER_GOALS", "PLAYER_ASSISTS"}`), or if absent for a player, derive baseline consensus book odds (`market_point_odds`, `market_goal_odds`, `market_assist_odds`) from position/deployment tier (and seed realistic player prop lines in `seed_demo_warehouse` / `sync_live_nhl_slate` so profit opportunities are evaluated for every skater).
+  - Compute expected value for all three prop markets using `compute_ev(prob, american_to_decimal(odds))`:
+    - `point_ev = round(compute_ev(prob_point, american_to_decimal(market_point_odds)), 4)`
+    - `goal_ev = round(compute_ev(prob_goal, american_to_decimal(market_goal_odds)), 4)`
+    - `assist_ev = round(compute_ev(prob_assist, american_to_decimal(market_assist_odds)), 4)`
+  - Pick the highest-EV prop among `("POINTS", market_point_odds, point_ev)`, `("GOALS", market_goal_odds, goal_ev)`, `("ASSISTS", market_assist_odds, assist_ev)` to populate:
+    - `best_prop_market`: `"POINTS"`, `"GOALS"`, or `"ASSISTS"`
+    - `best_prop_odds`: `int` (American odds)
+    - `best_prop_ev`: `float`
+    - `is_positive_ev`: `bool(best_prop_ev >= 0.035)` (flags `+EV` profit opportunities at $\ge +3.5\%$ edge per SRS §5.3).
+- Sort `point_scorers` descending by `prob_point` (tie-break by `best_prop_ev`).
 
 ### 4.2 Two Fantasy Teams (`teams` array in `run_warehouse_pipeline` & `seed_demo_warehouse`)
 - In `seed_demo_warehouse`:
@@ -134,7 +158,7 @@ Keep all existing tests passing and add:
 2. `test_two_fantasy_teams_and_point_scorers_in_report(tmp_path: Path)`:
    - Runs the pipeline and verifies:
      - `len(report["teams"]) == 2`, each with its own `team_summary`, `roster`, `recommendation`, and `waiver_targets`.
-     - `len(report["point_scorers"]) >= 4`, sorted by `prob_point` descending, with `0 < sc["prob_goal"] <= sc["prob_point"] < 1.0` and valid `fair_point_odds` / `fair_goal_odds`.
+     - `len(report["point_scorers"]) >= 4`, sorted by `prob_point` descending, with `0 < sc["prob_goal"] <= sc["prob_point"] < 1.0`, `0 < sc["prob_assist"] < 1.0`, valid `market_point_odds` / `market_goal_odds` / `market_assist_odds`, `point_ev` / `goal_ev` / `assist_ev`, `best_prop_market in {"POINTS", "GOALS", "ASSISTS"}`, and at least one skater flagged with `is_positive_ev is True` (`best_prop_ev >= 0.035`).
 3. `test_sync_live_nhl_slate_projects_tonights_real_matchups(tmp_path: Path)`:
    - Verifies offline-stubbed `sync_live_nhl_slate` + `run_warehouse_pipeline` produces valid `teams`, `games` (with consensus lines), and `point_scorers` for the active slate.
 
