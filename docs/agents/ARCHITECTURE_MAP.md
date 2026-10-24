@@ -37,9 +37,10 @@ MoneyPuck bulk CSV/parquet ┘                     │
 | `fantasy/solver.py`       | ΔValue add/drop gate (SRS §4.2), HOLD/RECOMMEND_SWAP  | Phase 3  |
 | `betting/poisson.py`      | λ_home/λ_away, P(Over L) grid over h,a ∈ [0,15]       | Phase 4  |
 | `betting/ev.py`           | EV = p·O−1 gate at +3.5%, consensus line parser       | Phase 4  |
-| `api/`                    | FastAPI on 127.0.0.1:8877, restricted CORS            | Phase 5  |
-| `web/`                    | Roster-first PWA, 4 tabs (SRS §6.1)                   | Phase 5  |
-| `scripts/`                | launchd plist, daily refresh, gh-pages publish        | Phase 5  |
+| `models/backtest.py`      | Bi-weekly walk-forward backtester & hyperparameter tuner | Phase 8 |
+| `api/`                    | FastAPI on 127.0.0.1:8877, restricted CORS, auto-refresh | Phase 5–8 |
+| `web/`                    | 2-Team Roster/Add-Drop + Game Totals + Point Scorers PWA | Phase 5–7B |
+| `scripts/`                | launchd plist, live NHL/odds refresh, gh-pages publish | Phase 5–8 |
 
 ## SQLite Schema (authoritative DDL in `db.py::SCHEMA_SQL`)
 
