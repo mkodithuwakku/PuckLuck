@@ -11,11 +11,22 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import math
 import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import db
 from betting.ev import (
@@ -38,6 +49,16 @@ from fantasy.solver import (
     solve_best_stream,
 )
 from features.builder import FeatureBuilder
+from ingestion.nhl import (
+    NHL_API_BASE,
+    TEAM_ALTITUDE_FT,
+    JsonFetcher,
+    ScheduledGame,
+    default_json_fetcher,
+    fetch_schedule,
+    ingest_boxscore,
+    ingest_team_roster,
+)
 from models.ridge import ComponentRidgeModel, ScoringRescorer
 
 STALE_AFTER_HOURS: float = 26.0
@@ -47,11 +68,14 @@ TOP_LEVEL_ALLOWLIST: FrozenSet[str] = frozenset(
     {
         "generated_at",
         "stale_after_hours",
+        "active_slate_date",
         "team_summary",
         "roster",
         "recommendation",
         "games",
         "free_agents",
+        "teams",
+        "point_scorers",
     }
 )
 TEAM_SUMMARY_ALLOWLIST: FrozenSet[str] = frozenset(
@@ -131,6 +155,46 @@ RECOMMENDATION_ALLOWLIST: FrozenSet[str] = frozenset(
         "drop_name",
     }
 )
+POINT_SCORER_ALLOWLIST: FrozenSet[str] = frozenset(
+    {
+        "player_id",
+        "display_name",
+        "position",
+        "team_abbr",
+        "opponent_abbr",
+        "projected_goals",
+        "projected_assists",
+        "projected_points",
+        "shots_on_goal",
+        "ixg_per60_ewma",
+        "pp_toi_share_ewma",
+        "prob_point",
+        "prob_goal",
+        "prob_assist",
+        "fair_point_odds",
+        "fair_goal_odds",
+        "fair_assist_odds",
+        "market_point_odds",
+        "market_goal_odds",
+        "market_assist_odds",
+        "point_ev",
+        "goal_ev",
+        "assist_ev",
+        "best_prop_market",
+        "best_prop_odds",
+        "best_prop_ev",
+        "is_positive_ev",
+    }
+)
+FANTASY_TEAM_ENTRY_ALLOWLIST: FrozenSet[str] = frozenset(
+    {
+        "team_key",
+        "team_summary",
+        "roster",
+        "recommendation",
+        "waiver_targets",
+    }
+)
 
 FORBIDDEN_KEY_SUBSTRINGS: Tuple[str, ...] = (
     "secret",
@@ -158,6 +222,8 @@ _ALLOWED_KEYS_ALL: FrozenSet[str] = frozenset(
     | GAME_ITEM_ALLOWLIST
     | FREE_AGENT_ALLOWLIST
     | RECOMMENDATION_ALLOWLIST
+    | POINT_SCORER_ALLOWLIST
+    | FANTASY_TEAM_ENTRY_ALLOWLIST
 )
 
 
@@ -173,10 +239,25 @@ def _filter_items(raw: Any, allowlist: FrozenSet[str]) -> list:
     return [_filter_dict(item, allowlist) for item in raw]
 
 
+def _filter_team_entry(entry: Any) -> Dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {}
+    rec = entry.get("recommendation")
+    return {
+        "team_key": entry.get("team_key"),
+        "team_summary": _filter_dict(entry.get("team_summary"), TEAM_SUMMARY_ALLOWLIST),
+        "roster": _filter_items(entry.get("roster"), ROSTER_ITEM_ALLOWLIST),
+        "recommendation": _recommendation_dict(rec) if rec is not None else {},
+        "waiver_targets": _filter_items(
+            entry.get("waiver_targets"), FREE_AGENT_ALLOWLIST
+        ),
+    }
+
+
 def sanitize_public_report(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Strip every key outside the per-section allowlists."""
     report: Dict[str, Any] = {}
-    for key in ("generated_at", "stale_after_hours"):
+    for key in ("generated_at", "stale_after_hours", "active_slate_date"):
         if key in raw:
             report[key] = raw[key]
     if "team_summary" in raw:
@@ -187,12 +268,19 @@ def sanitize_public_report(raw: Dict[str, Any]) -> Dict[str, Any]:
         report["roster"] = _filter_items(raw["roster"], ROSTER_ITEM_ALLOWLIST)
     if "recommendation" in raw:
         report["recommendation"] = _filter_dict(
-            raw["recommendation"], RECOMMENDATION_ALLOWLIST
+            _recommendation_dict(raw["recommendation"]),
+            RECOMMENDATION_ALLOWLIST,
         )
     if "games" in raw:
         report["games"] = _filter_items(raw["games"], GAME_ITEM_ALLOWLIST)
     if "free_agents" in raw:
         report["free_agents"] = _filter_items(raw["free_agents"], FREE_AGENT_ALLOWLIST)
+    if "teams" in raw:
+        report["teams"] = [_filter_team_entry(t) for t in raw["teams"] or []]
+    if "point_scorers" in raw:
+        report["point_scorers"] = _filter_items(
+            raw["point_scorers"], POINT_SCORER_ALLOWLIST
+        )
     return report
 
 
@@ -242,6 +330,14 @@ def validate_public_report(report: Dict[str, Any]) -> None:
         for key in item:
             if key not in FREE_AGENT_ALLOWLIST:
                 raise ValueError(f"non-allowlisted free_agents key: {key!r}")
+    for entry in report.get("teams") or []:
+        for key in entry:
+            if key not in FANTASY_TEAM_ENTRY_ALLOWLIST:
+                raise ValueError(f"non-allowlisted teams key: {key!r}")
+    for item in report.get("point_scorers") or []:
+        for key in item:
+            if key not in POINT_SCORER_ALLOWLIST:
+                raise ValueError(f"non-allowlisted point_scorers key: {key!r}")
     _walk_forbidden(report)
 
 
@@ -266,11 +362,14 @@ def _recommendation_dict(
 def build_public_report(
     *,
     generated_at: Optional[str] = None,
+    active_slate_date: Optional[str] = None,
     team_summary: Optional[Dict[str, Any]] = None,
     roster: Sequence[Dict[str, Any]] = (),
     recommendation: Optional[Union[SwapEvaluation, Dict[str, Any]]] = None,
     games: Sequence[Dict[str, Any]] = (),
     free_agents: Sequence[Dict[str, Any]] = (),
+    teams: Sequence[Dict[str, Any]] = (),
+    point_scorers: Sequence[Dict[str, Any]] = (),
 ) -> Dict[str, Any]:
     """Assemble, sanitize, and validate the public report payload."""
     raw: Dict[str, Any] = {
@@ -282,8 +381,22 @@ def build_public_report(
         "games": list(games),
         "free_agents": list(free_agents),
     }
+    if active_slate_date is not None:
+        raw["active_slate_date"] = active_slate_date
     if recommendation is not None:
         raw["recommendation"] = _recommendation_dict(recommendation)
+    if teams:
+        raw["teams"] = list(teams)
+        # Back-compat: top-level sections mirror teams[0] (SRS §6.1).
+        first = teams[0]
+        raw["team_summary"] = first.get("team_summary") or raw["team_summary"]
+        raw["roster"] = first.get("roster") or raw["roster"]
+        raw["free_agents"] = first.get("waiver_targets") or raw["free_agents"]
+        first_rec = first.get("recommendation")
+        if "recommendation" not in raw and first_rec is not None:
+            raw["recommendation"] = _recommendation_dict(first_rec)
+    if point_scorers:
+        raw["point_scorers"] = list(point_scorers)
 
     report = sanitize_public_report(raw)
     validate_public_report(report)
@@ -325,21 +438,21 @@ _DEMO_TEAMS: Tuple[Tuple[int, str, str, str, int], ...] = (
 
 # (player_id, display_name, primary_position, team_id, yahoo_player_id)
 _DEMO_SKATERS: Tuple[Tuple[int, str, str, int, Optional[str]], ...] = (
-    (8478402, "Connor McDavid", "C", 25, "449.p.6743"),
-    (8480803, "Evan Bouchard", "D", 25, "449.p.8038"),
+    (8478402, "Connor McDavid", "C", 25, "team1.p.6743"),
+    (8480803, "Evan Bouchard", "D", 25, "team1.p.8038"),
     (8475786, "Zach Hyman", "LW", 25, None),
-    (8477492, "Nathan MacKinnon", "C", 21, "449.p.7492"),
+    (8477492, "Nathan MacKinnon", "C", 21, "team2.p.7492"),
     (8478038, "Devon Toews", "D", 21, None),
-    (8480065, "Cale Makar", "D", 21, "449.p.8065"),
-    (8479318, "Auston Matthews", "C", 10, "449.p.9318"),
-    (8477939, "William Nylander", "RW", 10, None),
-    (8478427, "Sebastian Aho", "C", 12, None),
-    (8480830, "Andrei Svechnikov", "LW", 12, None),
+    (8480065, "Cale Makar", "D", 21, "team2.p.8065"),
+    (8479318, "Auston Matthews", "C", 10, "team1.p.9318"),
+    (8477939, "William Nylander", "RW", 10, "team1.p.7939"),
+    (8478427, "Sebastian Aho", "C", 12, "team2.p.8427"),
+    (8480830, "Andrei Svechnikov", "LW", 12, "team2.p.0830"),
     (8482093, "Seth Jarvis", "RW", 12, None),
 )
 _DEMO_GOALIES: Tuple[Tuple[int, str, int, Optional[str]], ...] = (
-    (8479979, "Stuart Skinner", 25, "449.p.7979"),
-    (8480382, "Alexandar Georgiev", 21, None),
+    (8479979, "Stuart Skinner", 25, "team1.p.7979"),
+    (8480382, "Alexandar Georgiev", 21, "team2.p.0382"),
 )
 
 _DEMO_DATES: Tuple[str, str, str] = ("2026-10-15", "2026-10-18", "2026-10-21")
@@ -487,6 +600,32 @@ _DEMO_MARKET_LINES: Tuple[Tuple[int, float, int, int, str], ...] = (
     (2026020102, 6.0, -120, 100, "2026-10-22T19:00:00Z"),
 )
 
+# (player_id) -> (PLAYER_POINTS, PLAYER_GOALS, PLAYER_ASSISTS) American odds.
+_DEMO_PROP_ODDS: Dict[int, Tuple[int, int, int]] = {
+    8478402: (-300, 120, -200),  # McDavid
+    8480803: (-150, 350, -170),  # Bouchard
+    8475786: (-170, 150, 140),  # Hyman
+    8477492: (-280, 115, -190),  # MacKinnon
+    8478038: (130, 420, 110),  # Toews
+    8480065: (-190, 200, -160),  # Makar
+    8479318: (-260, 110, -150),  # Matthews
+    8477939: (130, 190, 140),  # Nylander — soft points price (+EV seed)
+    8478427: (-220, 135, -170),  # Aho
+    8480830: (-160, 145, -120),  # Svechnikov
+    8482093: (160, 300, 220),  # Jarvis — soft prices (+EV seed)
+}
+_PROP_MARKETS: Tuple[str, str, str] = (
+    "PLAYER_POINTS",
+    "PLAYER_GOALS",
+    "PLAYER_ASSISTS",
+)
+_TEAM_SLATE_GAME: Dict[int, int] = {
+    25: 2026020101,
+    21: 2026020101,
+    10: 2026020102,
+    12: 2026020102,
+}
+
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
     """Return actual column names for ``table`` (schema-driven seeding)."""
@@ -519,14 +658,19 @@ def _insert_fact_rows(
 
 
 def _make_market_line(
-    game_id: int, total: float, over: int, under: int, captured_at: str
+    game_id: int,
+    total: float,
+    over: int,
+    under: int,
+    captured_at: str,
+    sportsbook: str = "PuckLuck Demo",
 ) -> MarketTotalLine:
     """Construct MarketTotalLine by matching the dataclass's real fields."""
     candidates: Dict[str, Any] = {
         "game_id": game_id,
-        "sportsbook": "PuckLuck Demo",
-        "book": "PuckLuck Demo",
-        "book_name": "PuckLuck Demo",
+        "sportsbook": sportsbook,
+        "book": sportsbook,
+        "book_name": sportsbook,
         "line": total,
         "total": total,
         "total_line": total,
@@ -660,6 +804,26 @@ def seed_demo_warehouse(
             conn, _make_market_line(game_id, total, over, under, captured_at)
         )
 
+    prop_rows: List[Dict[str, Any]] = []
+    for player_id, _name, _pos, team_id, _y in _DEMO_SKATERS:
+        point_odds, goal_odds, assist_odds = _DEMO_PROP_ODDS[player_id]
+        for market, odds in zip(_PROP_MARKETS, (point_odds, goal_odds, assist_odds)):
+            prop_rows.append(
+                {
+                    "game_id": _TEAM_SLATE_GAME[team_id],
+                    "sportsbook": "consensus",
+                    "market_type": market,
+                    "market": market,
+                    "target_id": str(player_id),
+                    "line": 0.5,
+                    "over_odds": odds,
+                    "under_odds": -120 if odds > 0 else 110,
+                    "captured_at": "2026-10-22T20:00:00Z",
+                    "season": "20262027",
+                }
+            )
+    _insert_fact_rows(conn, "fact_market_lines", prop_rows)
+
     conn.commit()
 
 
@@ -749,9 +913,16 @@ def _market_game_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     under_col = _pick(columns, "under_odds", "under_price")
     if not all((gid_col, line_col, over_col, under_col)):
         return []
+    market_col = _pick(columns, "market_type", "market")
+    prop_filter = ""
+    if market_col:
+        marks = ", ".join(f"'{m}'" for m in _PROP_MARKETS)
+        prop_filter = f" WHERE {market_col} IS NULL OR {market_col} NOT IN ({marks})"
     rows = [
         dict(zip(columns, r))
-        for r in conn.execute("SELECT * FROM fact_market_lines").fetchall()
+        for r in conn.execute(
+            f"SELECT * FROM fact_market_lines{prop_filter}"
+        ).fetchall()
     ]
     by_game: Dict[int, List[Dict[str, Any]]] = {}
     for row in rows:
@@ -791,6 +962,399 @@ def _recent_pair_stream(
     return seen
 
 
+# ---------------------------------------------------------------------------
+# Phase 7A: live slate rollover, open consensus lines, 2-team fantasy, props
+# ---------------------------------------------------------------------------
+
+ESPN_SCOREBOARD_URL = (
+    "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"
+)
+_FINISHED_STATES: FrozenSet[str] = frozenset({"FINAL", "OFF"})
+_FANTASY_TEAM_PROFILES: Dict[str, Tuple[str, str, str]] = {
+    "team1": ("McDavid's Oil", "MO", "High-Stakes H2H"),
+    "team2": ("MacKinnon's Avs", "MA", "Keeper Dynasty"),
+}
+
+
+def _game_finished(game: Dict[str, Any]) -> bool:
+    return str(game.get("gameState") or "").upper() in _FINISHED_STATES
+
+
+def _week_days(
+    payload: Dict[str, Any], fallback_date: str
+) -> Dict[str, List[Dict[str, Any]]]:
+    """date -> raw game dicts, from gameWeek blocks or a flat games list."""
+    days: Dict[str, List[Dict[str, Any]]] = {}
+    week = payload.get("gameWeek")
+    if isinstance(week, list):
+        for day in week:
+            if not isinstance(day, dict) or not day.get("date"):
+                continue
+            days[str(day["date"])] = [
+                g for g in (day.get("games") or []) if isinstance(g, dict)
+            ]
+    elif isinstance(payload.get("games"), list):
+        for g in payload["games"]:
+            if not isinstance(g, dict):
+                continue
+            days.setdefault(str(g.get("gameDate") or fallback_date), []).append(g)
+    return days
+
+
+def resolve_active_slate(
+    request_date: str, *, nhl_fetcher: JsonFetcher = default_json_fetcher
+) -> Tuple[str, List[ScheduledGame], List[str]]:
+    """Pick tonight's slate; roll forward when today's games are done.
+
+    Returns ``(active_slate_date, scheduled_games, completed_dates)`` where
+    ``completed_dates`` are finished dates before the active slate (their
+    boxscores are ingestable history).
+    """
+    payload = nhl_fetcher(f"{NHL_API_BASE}/schedule/{request_date}")
+    days = _week_days(payload, request_date)
+
+    active: Optional[str] = None
+    for day in sorted(days):
+        if (
+            day >= request_date
+            and days[day]
+            and any(not _game_finished(g) for g in days[day])
+        ):
+            active = day
+            break
+    if active is None and payload.get("nextStartDate"):
+        next_start = str(payload["nextStartDate"])
+        payload2 = nhl_fetcher(f"{NHL_API_BASE}/schedule/{next_start}")
+        days2 = _week_days(payload2, next_start)
+        for day in sorted(days2):
+            if days2[day] and any(not _game_finished(g) for g in days2[day]):
+                active = day
+                break
+        for day, games in days2.items():
+            days.setdefault(day, games)
+    if active is None:
+        played = [d for d in sorted(days) if days[d]]
+        active = played[-1] if played else request_date
+
+    completed = sorted(d for d in days if d < active and days[d])
+    scheduled = fetch_schedule(active, fetcher=nhl_fetcher)
+    return active, scheduled, completed
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def fetch_open_consensus_lines(
+    slate_date: str,
+    scheduled_games: Sequence[ScheduledGame],
+    *,
+    http_fetcher: Callable[[str], Dict[str, Any]] = default_json_fetcher,
+    default_line: float = 6.5,
+) -> List[MarketTotalLine]:
+    """Open-source O/U lines from ESPN's public scoreboard (baseline fallback)."""
+    compact = slate_date.replace("-", "")
+    try:
+        payload = http_fetcher(f"{ESPN_SCOREBOARD_URL}?dates={compact}")
+    except Exception:
+        payload = {}
+
+    odds_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for event in (payload or {}).get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        for comp in event.get("competitions") or []:
+            home_abbr = away_abbr = ""
+            for competitor in comp.get("competitors") or []:
+                side = str(competitor.get("homeAway") or "").lower()
+                abbr = str((competitor.get("team") or {}).get("abbreviation") or "")
+                if side == "home":
+                    home_abbr = abbr
+                elif side == "away":
+                    away_abbr = abbr
+            for odds in comp.get("odds") or []:
+                if home_abbr and away_abbr and isinstance(odds, dict):
+                    odds_index.setdefault((home_abbr, away_abbr), odds)
+
+    lines: List[MarketTotalLine] = []
+    captured = f"{slate_date}T12:00:00Z"
+    for game in scheduled_games:
+        entry = odds_index.get((game.home_abbr, game.away_abbr))
+        if entry is not None:
+            book = str((entry.get("provider") or {}).get("name") or "consensus")
+            lines.append(
+                _make_market_line(
+                    game.game_id,
+                    _to_float(entry.get("overUnder"), default_line),
+                    _to_int(entry.get("overOdds"), -110),
+                    _to_int(entry.get("underOdds"), -110),
+                    captured,
+                    sportsbook=book,
+                )
+            )
+        else:
+            lines.append(
+                _make_market_line(
+                    game.game_id,
+                    default_line,
+                    -110,
+                    -110,
+                    captured,
+                    sportsbook="consensus",
+                )
+            )
+    return lines
+
+
+def prob_to_fair_american(p: float) -> int:
+    """Convert a probability to fair (vig-free) American odds."""
+    p = min(max(float(p), 1e-6), 0.999999)
+    if p >= 0.5:
+        return -int(round(100.0 * p / max(1e-6, 1.0 - p)))
+    return int(round(100.0 * (1.0 - p) / max(1e-6, p)))
+
+
+def _baseline_prop_odds(position: str, projected_fp: float) -> Tuple[int, int, int]:
+    """(points, goals, assists) book odds when no consensus prop is stored."""
+    elite = projected_fp >= 5.5
+    if position == "D":
+        return (-140 if elite else 120, 180 if elite else 350, -120 if elite else 160)
+    return (-150 if elite else 130, 160 if elite else 260, -130 if elite else 170)
+
+
+def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int]:
+    """Stored consensus prop prices for one skater from fact_market_lines."""
+    columns = _table_columns(conn, "fact_market_lines")
+    market_col = _pick(columns, "market_type", "market")
+    target_col = _pick(columns, "target_id")
+    over_col = _pick(columns, "over_odds", "over_price")
+    if not all((market_col, target_col, over_col)):
+        return {}
+    marks = ", ".join(f"'{m}'" for m in _PROP_MARKETS)
+    rows = conn.execute(
+        f"SELECT {market_col} AS m, {over_col} AS o FROM fact_market_lines "
+        f"WHERE {target_col} = ? AND {market_col} IN ({marks})",
+        (str(player_id),),
+    ).fetchall()
+    key_map = {
+        "PLAYER_POINTS": "point",
+        "PLAYER_GOALS": "goal",
+        "PLAYER_ASSISTS": "assist",
+    }
+    out: Dict[str, int] = {}
+    for market, odds in rows:
+        key = key_map.get(str(market).upper())
+        if key:
+            out[key] = _to_int(odds, -110)
+    return out
+
+
+def compute_point_scorer_projection(
+    *,
+    player_id: int,
+    display_name: str,
+    position: str,
+    team_abbr: Optional[str],
+    opponent_abbr: Optional[str],
+    comps: Dict[str, float],
+    feats: Dict[str, float],
+    projected_fp: float,
+    market_odds: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Poisson 1+ point/goal/assist probabilities + prop +EV screening."""
+    lam_g = max(0.01, float(comps.get("G", 0.0)))
+    lam_a = max(0.01, float(comps.get("A", 0.0)))
+    lam_pts = lam_g + lam_a
+    prob_point = round(1.0 - math.exp(-lam_pts), 4)
+    prob_goal = round(1.0 - math.exp(-lam_g), 4)
+    prob_assist = round(1.0 - math.exp(-lam_a), 4)
+
+    stored = market_odds or {}
+    base_point, base_goal, base_assist = _baseline_prop_odds(position, projected_fp)
+    market_point_odds = int(stored.get("point", base_point))
+    market_goal_odds = int(stored.get("goal", base_goal))
+    market_assist_odds = int(stored.get("assist", base_assist))
+
+    point_ev = round(compute_ev(prob_point, american_to_decimal(market_point_odds)), 4)
+    goal_ev = round(compute_ev(prob_goal, american_to_decimal(market_goal_odds)), 4)
+    assist_ev = round(
+        compute_ev(prob_assist, american_to_decimal(market_assist_odds)), 4
+    )
+    best_market, best_odds, best_ev = max(
+        ("POINTS", market_point_odds, point_ev),
+        ("GOALS", market_goal_odds, goal_ev),
+        ("ASSISTS", market_assist_odds, assist_ev),
+        key=lambda c: c[2],
+    )
+    return {
+        "player_id": player_id,
+        "display_name": display_name,
+        "position": position,
+        "team_abbr": team_abbr,
+        "opponent_abbr": opponent_abbr,
+        "projected_goals": round(lam_g, 2),
+        "projected_assists": round(lam_a, 2),
+        "projected_points": round(lam_pts, 2),
+        "shots_on_goal": round(float(comps.get("SOG", 0.0)), 1),
+        "ixg_per60_ewma": round(float(feats.get("ixg_per60_ewma", 0.0)), 3),
+        "pp_toi_share_ewma": round(float(feats.get("pp_toi_share_ewma", 0.0)), 3),
+        "prob_point": prob_point,
+        "prob_goal": prob_goal,
+        "prob_assist": prob_assist,
+        "fair_point_odds": prob_to_fair_american(prob_point),
+        "fair_goal_odds": prob_to_fair_american(prob_goal),
+        "fair_assist_odds": prob_to_fair_american(prob_assist),
+        "market_point_odds": market_point_odds,
+        "market_goal_odds": market_goal_odds,
+        "market_assist_odds": market_assist_odds,
+        "point_ev": point_ev,
+        "goal_ev": goal_ev,
+        "assist_ev": assist_ev,
+        "best_prop_market": best_market,
+        "best_prop_odds": int(best_odds),
+        "best_prop_ev": round(float(best_ev), 4),
+        "is_positive_ev": bool(best_ev >= 0.035),
+    }
+
+
+def _seed_local_fantasy_teams(conn: sqlite3.Connection) -> None:
+    """Tag 2 local fantasy teams (4 skaters + 1 goalie each) sans Yahoo OAuth."""
+    player_cols = _table_columns(conn, "dim_players")
+    pos_col = _pick(player_cols, "primary_position", "position")
+    name_col = _pick(player_cols, "display_name", "name")
+    rows = conn.execute(
+        f"SELECT player_id, {name_col}, {pos_col} FROM dim_players "
+        "WHERE yahoo_player_id IS NULL "
+        "ORDER BY (player_id IN ("
+        "  SELECT DISTINCT player_id FROM fact_skater_games"
+        "  UNION SELECT DISTINCT goalie_id FROM fact_goalie_games"
+        ")) DESC, player_id"
+    ).fetchall()
+    skaters = [r for r in rows if str(r[2]) != "G"]
+    goalies = [r for r in rows if str(r[2]) == "G"]
+    tagged: List[Tuple[Any, str]] = []
+    for idx, row in enumerate(skaters[:8]):
+        tagged.append((row, f"team{idx // 4 + 1}.p.{int(row[0])}"))
+    for idx, row in enumerate(goalies[:2]):
+        tagged.append((row, f"team{idx + 1}.p.{int(row[0])}"))
+    for row, yahoo_id in tagged:
+        db.upsert_player(
+            conn,
+            int(row[0]),
+            str(row[1]),
+            str(row[2]),
+            yahoo_player_id=yahoo_id,
+        )
+
+
+def _seed_baseline_props(conn: sqlite3.Connection, slate_date: str) -> None:
+    """Baseline consensus prop rows so +EV is evaluated for every skater."""
+    player_cols = _table_columns(conn, "dim_players")
+    pos_col = _pick(player_cols, "primary_position", "position")
+    market_columns = set(_table_columns(conn, "fact_market_lines"))
+    if not (
+        _pick(list(market_columns), "market_type", "market")
+        and "target_id" in market_columns
+    ):
+        return
+    captured = f"{slate_date}T12:00:00Z"
+    skaters = conn.execute(
+        f"SELECT player_id, {pos_col} FROM dim_players WHERE {pos_col} != 'G'"
+    ).fetchall()
+    rows: List[Dict[str, Any]] = []
+    for player_id, position in skaters:
+        base = _baseline_prop_odds(str(position), 4.0)
+        for market, odds in zip(_PROP_MARKETS, base):
+            rows.append(
+                {
+                    "game_id": 0,
+                    "sportsbook": "consensus",
+                    "market_type": market,
+                    "market": market,
+                    "target_id": str(int(player_id)),
+                    "line": 0.5,
+                    "over_odds": odds,
+                    "under_odds": -120 if odds > 0 else 110,
+                    "captured_at": captured,
+                    "season": "20262027",
+                }
+            )
+    _insert_fact_rows(conn, "fact_market_lines", rows)
+
+
+def sync_live_nhl_slate(
+    conn: sqlite3.Connection,
+    target_date: str = "2026-10-23",
+    *,
+    nhl_fetcher: JsonFetcher = default_json_fetcher,
+    odds_fetcher: Optional[Callable[[str], Dict[str, Any]]] = None,
+    lookback_days: int = 3,
+    seed_local_teams: bool = True,
+) -> Tuple[str, List[ScheduledGame]]:
+    """Sync tonight's real slate: rollover, history, rosters, lines, teams.
+
+    Returns ``(active_slate_date, scheduled_games)``.
+    """
+    active, scheduled, completed = resolve_active_slate(
+        target_date, nhl_fetcher=nhl_fetcher
+    )
+
+    for day in completed[-max(1, int(lookback_days)) :]:
+        try:
+            day_games = fetch_schedule(day, fetcher=nhl_fetcher)
+        except Exception:
+            continue
+        for game in day_games:
+            try:
+                ingest_boxscore(conn, game.game_id, fetcher=nhl_fetcher)
+            except Exception:
+                continue
+
+    for game in scheduled:
+        db.upsert_team(
+            conn,
+            game.home_team_id,
+            game.home_abbr,
+            game.home_name,
+            game.venue,
+            altitude_ft=TEAM_ALTITUDE_FT.get(game.home_abbr, 0),
+        )
+        db.upsert_team(
+            conn,
+            game.away_team_id,
+            game.away_abbr,
+            game.away_name,
+            "",
+            altitude_ft=TEAM_ALTITUDE_FT.get(game.away_abbr, 0),
+        )
+        for abbr in (game.home_abbr, game.away_abbr):
+            try:
+                ingest_team_roster(conn, abbr, fetcher=nhl_fetcher, commit=False)
+            except Exception:
+                continue
+
+    for line in fetch_open_consensus_lines(
+        active, scheduled, http_fetcher=odds_fetcher or nhl_fetcher
+    ):
+        upsert_total_line(conn, line)
+
+    if seed_local_teams and not os.environ.get("YAHOO_CLIENT_ID"):
+        _seed_local_fantasy_teams(conn)
+    _seed_baseline_props(conn, active)
+    conn.commit()
+    return active, scheduled
+
+
 def run_warehouse_pipeline(
     conn: sqlite3.Connection,
     *,
@@ -799,6 +1363,8 @@ def run_warehouse_pipeline(
     team_summary: Optional[Dict[str, Any]] = None,
     horizon_weeks: float = 2.5,
     generated_at: Optional[str] = None,
+    active_slate_date: Optional[str] = None,
+    slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     """Run FeatureBuilder -> Ridge -> Rescorer -> Solver/Poisson -> report."""
     weights = stat_weights or DEFAULT_STAT_WEIGHTS
@@ -826,29 +1392,32 @@ def run_warehouse_pipeline(
     latest_skater = _latest_by_player(conn, "fact_skater_games", as_of_date)
     latest_goalie = _latest_by_player(conn, "fact_goalie_games", as_of_date)
 
-    roster_items: List[Dict[str, Any]] = []
     fa_items: List[Dict[str, Any]] = []
-    roster_candidates: List[CandidatePlayer] = []
     fa_candidates: List[CandidatePlayer] = []
-    goalie_roster_items: List[Dict[str, Any]] = []
+    skater_records: List[Dict[str, Any]] = []
+    goalie_records: List[Dict[str, Any]] = []
 
     for player_id, display_name, position, yahoo_id in players:
         player_id = int(player_id)
+        yahoo_prefix = str(yahoo_id).split(".", 1)[0] if yahoo_id is not None else None
         if position == "G":
-            if yahoo_id is not None and player_id in latest_goalie:
-                team_id, opponent_id = latest_goalie[player_id]
-                avg = conn.execute(
-                    "SELECT AVG(saves), AVG(gsax) FROM fact_goalie_games "
-                    "WHERE goalie_id = ? AND game_date < ?",
-                    (player_id, as_of_date),
-                ).fetchone()
-                saves_avg, gsax_avg = avg if avg else (0.0, 0.0)
-                proj = max(
-                    0.0,
-                    round(0.2 * float(saves_avg or 0) + 2.0 * float(gsax_avg or 0), 2),
-                )
-                goalie_roster_items.append(
-                    {
+            if player_id not in latest_goalie:
+                continue
+            team_id, opponent_id = latest_goalie[player_id]
+            avg = conn.execute(
+                "SELECT AVG(saves), AVG(gsax) FROM fact_goalie_games "
+                "WHERE goalie_id = ? AND game_date < ?",
+                (player_id, as_of_date),
+            ).fetchone()
+            saves_avg, gsax_avg = avg if avg else (0.0, 0.0)
+            proj = max(
+                0.0,
+                round(0.2 * float(saves_avg or 0) + 2.0 * float(gsax_avg or 0), 2),
+            )
+            goalie_records.append(
+                {
+                    "yahoo_prefix": yahoo_prefix,
+                    "item": {
                         "player_id": player_id,
                         "display_name": display_name,
                         "position": "G",
@@ -858,8 +1427,9 @@ def run_warehouse_pipeline(
                         "goalie_status": "CONFIRMED",
                         "projected_fp": proj,
                         "shots_on_goal": 0,
-                    }
-                )
+                    },
+                }
+            )
             continue
         if player_id not in latest_skater:
             continue
@@ -882,38 +1452,44 @@ def run_warehouse_pipeline(
         proj_fp = round(float(rescorer.score(comps)), 2)
         feats = fv.features
         ros_weekly = proj_fp * 3.0  # ~3 games per fantasy week
+        candidate = _make_candidate(
+            player_id,
+            display_name,
+            proj_fp,
+            (proj_fp,),
+            ros_weekly,
+            droppable=yahoo_id is not None,
+        )
 
+        record = {
+            "player_id": player_id,
+            "display_name": display_name,
+            "position": position,
+            "team_id": team_id,
+            "opponent_id": opponent_id,
+            "yahoo_prefix": yahoo_prefix,
+            "comps": comps,
+            "feats": feats,
+            "proj_fp": proj_fp,
+            "candidate": candidate,
+        }
         if yahoo_id is not None:
-            roster_items.append(
-                {
-                    "player_id": player_id,
-                    "display_name": display_name,
-                    "position": position,
-                    "selected_slot": position,
-                    "team_abbr": abbrs.get(team_id),
-                    "opponent_abbr": abbrs.get(opponent_id),
-                    "opp_def_rtg_rel": round(
-                        float(feats.get("opp_def_rtg_rel", 0.0)), 3
-                    ),
-                    "projected_fp": proj_fp,
-                    "shots_on_goal": round(comps.get("SOG", 0.0), 1),
-                    "ixg": comps.get("iXG", 0.0),
-                    "goals": comps.get("G", 0.0),
-                    "assists": comps.get("A", 0.0),
-                    "blocks": comps.get("BLK", 0.0),
-                    "hits": comps.get("HIT", 0.0),
-                }
-            )
-            roster_candidates.append(
-                _make_candidate(
-                    player_id,
-                    display_name,
-                    proj_fp,
-                    (proj_fp,),
-                    ros_weekly,
-                    droppable=True,
-                )
-            )
+            record["item"] = {
+                "player_id": player_id,
+                "display_name": display_name,
+                "position": position,
+                "selected_slot": position,
+                "team_abbr": abbrs.get(team_id),
+                "opponent_abbr": abbrs.get(opponent_id),
+                "opp_def_rtg_rel": round(float(feats.get("opp_def_rtg_rel", 0.0)), 3),
+                "projected_fp": proj_fp,
+                "shots_on_goal": round(comps.get("SOG", 0.0), 1),
+                "ixg": comps.get("iXG", 0.0),
+                "goals": comps.get("G", 0.0),
+                "assists": comps.get("A", 0.0),
+                "blocks": comps.get("BLK", 0.0),
+                "hits": comps.get("HIT", 0.0),
+            }
         else:
             fa_items.append(
                 {
@@ -932,65 +1508,141 @@ def run_warehouse_pipeline(
                     ),
                 }
             )
-            fa_candidates.append(
-                _make_candidate(
-                    player_id,
-                    display_name,
-                    proj_fp,
-                    (proj_fp,),
-                    ros_weekly,
-                    droppable=False,
-                )
-            )
+            fa_candidates.append(candidate)
+        skater_records.append(record)
 
-    roster_items.sort(key=lambda r: -float(r["projected_fp"]))
-    roster_items.extend(goalie_roster_items)
     fa_items.sort(key=lambda f: -float(f["ixg_per60_ewma"]))
-
-    recommendation = solve_best_stream(
-        fa_candidates, roster_candidates, horizon_weeks=horizon_weeks
+    game_items, slate_team_ids = _build_game_items(
+        conn, as_of_date, abbrs, slate_matchups
     )
-    if recommendation is None and fa_candidates and roster_candidates:
-        worst = min(roster_candidates, key=lambda c: c.fp_ros_weekly_avg)
-        best = max(fa_candidates, key=lambda c: c.fp_tonight)
-        recommendation = evaluate_swap(best, worst, horizon_weeks=horizon_weeks)
 
-    game_items = _build_game_items(conn, as_of_date, abbrs)
+    # Two fantasy teams: group rostered players by yahoo prefix; if all share
+    # one prefix (e.g. "449"), split evenly into two squads.
+    rostered = [r for r in skater_records if r["yahoo_prefix"] is not None]
+    prefixes = sorted({r["yahoo_prefix"] for r in rostered})
+    if len(prefixes) >= 2:
+        groups = [
+            (p, [r for r in rostered if r["yahoo_prefix"] == p]) for p in prefixes[:2]
+        ]
+    else:
+        half = (len(rostered) + 1) // 2
+        groups = [("team1", rostered[:half]), ("team2", rostered[half:])]
+    while len(groups) < 2:
+        groups.append((f"team{len(groups) + 1}", []))
 
-    summary = team_summary or {
-        "team_name": "PuckLuck Demo",
-        "team_initials": "PD",
-        "league_name": "Demo League",
-        "adds_used": 0,
-        "adds_limit": 4,
-        "matchup_score": "0 - 0",
-    }
+    # Goalies join the team matching their yahoo prefix; with a single
+    # prefix (split-evenly mode) they split one-per-team in order.
+    rostered_goalies = [g for g in goalie_records if g["yahoo_prefix"] is not None]
+    if len(prefixes) >= 2:
+        goalie_groups = [
+            [g["item"] for g in rostered_goalies if g["yahoo_prefix"] == groups[i][0]]
+            for i in range(2)
+        ]
+    else:
+        goalie_items = [g["item"] for g in rostered_goalies]
+        goalie_groups = [goalie_items[:1], goalie_items[1:2]]
+
+    team_entries: List[Dict[str, Any]] = []
+    for idx, (prefix, members) in enumerate(groups[:2]):
+        team_key = prefix if prefix.startswith("team") else f"team_{idx + 1}"
+        name, initials, league = _FANTASY_TEAM_PROFILES.get(
+            team_key,
+            _FANTASY_TEAM_PROFILES.get(
+                prefix, (f"PuckLuck Team {idx + 1}", f"T{idx + 1}", "Demo League")
+            ),
+        )
+        team_roster = sorted(
+            (r["item"] for r in members),
+            key=lambda item: -float(item["projected_fp"]),
+        )
+        team_roster.extend(goalie_groups[idx])
+        team_candidates = [r["candidate"] for r in members]
+        recommendation = solve_best_stream(
+            fa_candidates, team_candidates, horizon_weeks=horizon_weeks
+        )
+        if recommendation is None and fa_candidates and team_candidates:
+            worst = min(team_candidates, key=lambda c: c.fp_ros_weekly_avg)
+            best = max(fa_candidates, key=lambda c: c.fp_tonight)
+            recommendation = evaluate_swap(best, worst, horizon_weeks=horizon_weeks)
+        summary = dict(
+            team_summary
+            or {
+                "team_name": name,
+                "team_initials": initials,
+                "league_name": league,
+                "adds_used": 0,
+                "adds_limit": 4,
+                "matchup_score": "0 - 0",
+            }
+        )
+        summary["team_name"] = name
+        summary["team_initials"] = initials
+        summary["league_name"] = league
+        team_entries.append(
+            {
+                "team_key": team_key,
+                "team_summary": summary,
+                "roster": team_roster,
+                "recommendation": recommendation,
+                "waiver_targets": fa_items,
+            }
+        )
+
+    # Point/goal/assist scorers on the active slate.
+    scorer_records = [
+        r
+        for r in skater_records
+        if not slate_team_ids or r["team_id"] in slate_team_ids
+    ]
+    point_scorers = [
+        compute_point_scorer_projection(
+            player_id=r["player_id"],
+            display_name=r["display_name"],
+            position=r["position"],
+            team_abbr=abbrs.get(r["team_id"]),
+            opponent_abbr=abbrs.get(r["opponent_id"]),
+            comps=r["comps"],
+            feats=r["feats"],
+            projected_fp=r["proj_fp"],
+            market_odds=_player_prop_odds(conn, r["player_id"]),
+        )
+        for r in scorer_records
+    ]
+    point_scorers.sort(key=lambda s: (-s["prob_point"], -s["best_prop_ev"]))
+
     return build_public_report(
         generated_at=generated_at,
-        team_summary=summary,
-        roster=roster_items,
-        recommendation=recommendation,
+        active_slate_date=active_slate_date or as_of_date,
         games=game_items,
-        free_agents=fa_items,
+        teams=team_entries,
+        point_scorers=point_scorers,
     )
 
 
 def _build_game_items(
-    conn: sqlite3.Connection, as_of_date: str, abbrs: Dict[int, str]
-) -> List[Dict[str, Any]]:
+    conn: sqlite3.Connection,
+    as_of_date: str,
+    abbrs: Dict[int, str],
+    slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
+) -> Tuple[List[Dict[str, Any]], FrozenSet[int]]:
+    """Build the games list; returns (items, team_ids on tonight's slate)."""
     consensus = _market_game_rows(conn)
     if not consensus:
-        return []
+        return [], frozenset()
+    matchup_map = dict(_DEMO_MATCHUPS)
+    matchup_map.update(slate_matchups or {})
     fallback_pairs = _recent_pair_stream(conn, as_of_date)
     items: List[Dict[str, Any]] = []
+    slate_team_ids: set = set()
     for idx, market in enumerate(consensus):
         game_id = market["game_id"]
-        pairing = _DEMO_MATCHUPS.get(game_id)
+        pairing = matchup_map.get(game_id)
         if pairing is None and fallback_pairs:
             pairing = fallback_pairs[idx % len(fallback_pairs)]
         if pairing is None:
             continue
         home_id, away_id = pairing
+        slate_team_ids.update((home_id, away_id))
 
         home_inputs, away_inputs = build_matchup_inputs_from_db(
             conn, home_id, away_id, as_of_date
@@ -1039,7 +1691,7 @@ def _build_game_items(
                 "away_goalie_status": "PROJECTED",
             }
         )
-    return items
+    return items, frozenset(slate_team_ids)
 
 
 def _dim_players_empty(conn: sqlite3.Connection) -> bool:
@@ -1064,13 +1716,40 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
         action="store_true",
         help="Seed the demo warehouse before running the pipeline.",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Sync tonight's real NHL slate (schedule, boxscores, rosters, "
+        "open consensus lines) before running the pipeline.",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=3,
+        help="Completed slate days to ingest boxscores for (live mode).",
+    )
     args = parser.parse_args(argv)
 
     conn = db.init_db(args.db_path)
     try:
-        if args.demo or _dim_players_empty(conn):
-            seed_demo_warehouse(conn, as_of_date=args.date)
-        report = run_warehouse_pipeline(conn, as_of_date=args.date)
+        if args.live:
+            active_date, scheduled = sync_live_nhl_slate(
+                conn, args.date, lookback_days=args.lookback_days
+            )
+            slate_matchups = {
+                g.game_id: (g.home_team_id, g.away_team_id) for g in scheduled
+            }
+        else:
+            active_date = args.date
+            slate_matchups = None
+            if args.demo or _dim_players_empty(conn):
+                seed_demo_warehouse(conn, as_of_date=args.date)
+        report = run_warehouse_pipeline(
+            conn,
+            as_of_date=active_date,
+            active_slate_date=active_date,
+            slate_matchups=slate_matchups,
+        )
         path = write_report_json(report, args.output)
     finally:
         conn.close()

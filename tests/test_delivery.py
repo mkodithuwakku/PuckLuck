@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.middleware.cors import CORSMiddleware
 
+import db
 import scripts.refresh as refresh
 from api.server import (
     ALLOWED_CORS_ORIGINS,
@@ -24,6 +25,171 @@ from scripts.refresh import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _nhl_team(team_id: int, abbrev: str, place: str, name: str) -> dict:
+    return {
+        "id": team_id,
+        "abbrev": abbrev,
+        "placeName": {"default": place},
+        "commonName": {"default": name},
+    }
+
+
+def _schedule_payload() -> dict:
+    """2026-10-23 finished (OFF); 2026-10-24 upcoming (FUT) — same teams."""
+    return {
+        "gameWeek": [
+            {
+                "date": "2026-10-23",
+                "games": [
+                    {
+                        "id": 9001,
+                        "season": 20262027,
+                        "gameDate": "2026-10-23",
+                        "gameState": "OFF",
+                        "startTimeUTC": "2026-10-23T02:00:00Z",
+                        "homeTeam": _nhl_team(25, "EDM", "Edmonton", "Oilers"),
+                        "awayTeam": _nhl_team(21, "COL", "Colorado", "Avalanche"),
+                        "venue": {"default": "Rogers Place"},
+                    }
+                ],
+            },
+            {
+                "date": "2026-10-24",
+                "games": [
+                    {
+                        "id": 9002,
+                        "season": 20262027,
+                        "gameDate": "2026-10-24",
+                        "gameState": "FUT",
+                        "startTimeUTC": "2026-10-24T02:00:00Z",
+                        "homeTeam": _nhl_team(25, "EDM", "Edmonton", "Oilers"),
+                        "awayTeam": _nhl_team(21, "COL", "Colorado", "Avalanche"),
+                        "venue": {"default": "Rogers Place"},
+                    }
+                ],
+            },
+        ]
+    }
+
+
+def _boxscore_skater(pid: int, name: str, pos: str, toi: str = "18:00") -> dict:
+    return {
+        "playerId": pid,
+        "name": {"default": name},
+        "position": pos,
+        "toi": toi,
+        "powerPlayToi": "2:00",
+        "goals": 1,
+        "assists": 1,
+        "sog": 4,
+        "hits": 2,
+        "blockedShots": 1,
+        "faceoffsWon": 0,
+        "pim": 0,
+    }
+
+
+def _boxscore_payload() -> dict:
+    away_skaters = [
+        _boxscore_skater(201, "N. MacKinnon", "C"),
+        _boxscore_skater(202, "C. Makar", "D"),
+        _boxscore_skater(203, "D. Toews", "D"),
+        _boxscore_skater(204, "M. Rantanen", "R"),
+        _boxscore_skater(205, "J. Compher", "C"),
+        _boxscore_skater(206, "L. O'Connor", "R"),
+    ]
+    home_skaters = [
+        _boxscore_skater(101, "C. McDavid", "C"),
+        _boxscore_skater(102, "E. Bouchard", "D"),
+        _boxscore_skater(103, "Z. Hyman", "L"),
+        _boxscore_skater(104, "R. Nugent-Hopkins", "C"),
+        _boxscore_skater(105, "D. Nurse", "D"),
+        _boxscore_skater(106, "C. Perry", "R"),
+    ]
+    goalies = lambda pid, name: {
+        "playerId": pid,
+        "name": {"default": name},
+        "position": "G",
+        "toi": "60:00",
+        "shotsAgainst": 30,
+        "goalsAgainst": 3,
+    }
+    return {
+        "id": 9001,
+        "season": 20262027,
+        "gameDate": "2026-10-23",
+        "homeTeam": _nhl_team(25, "EDM", "Edmonton", "Oilers"),
+        "awayTeam": _nhl_team(21, "COL", "Colorado", "Avalanche"),
+        "venue": {"default": "Rogers Place"},
+        "playerByGameStats": {
+            "awayTeam": {
+                "forwards": away_skaters[:4],
+                "defense": away_skaters[4:],
+                "goalies": [goalies(297, "A. Georgiev")],
+            },
+            "homeTeam": {
+                "forwards": home_skaters[:4],
+                "defense": home_skaters[4:],
+                "goalies": [goalies(197, "S. Skinner")],
+            },
+        },
+    }
+
+
+def _roster_payload(prefix_ids) -> dict:
+    first_last = {
+        101: ("Connor", "McDavid"),
+        102: ("Evan", "Bouchard"),
+        201: ("Nathan", "MacKinnon"),
+        202: ("Cale", "Makar"),
+        197: ("Stuart", "Skinner"),
+        297: ("Alexandar", "Georgiev"),
+    }
+    players = []
+    for pid in prefix_ids:
+        first, last = first_last.get(pid, ("Test", f"Player{pid}"))
+        players.append(
+            {
+                "id": pid,
+                "firstName": {"default": first},
+                "lastName": {"default": last},
+                "positionCode": "G" if pid in (197, 297) else "C",
+                "shootsCatches": "L",
+                "birthDate": "1997-01-13",
+            }
+        )
+    return {
+        "forwards": [p for p in players if p["positionCode"] == "C"],
+        "defensemen": [p for p in players if p["positionCode"] == "D"],
+        "goalies": [p for p in players if p["positionCode"] == "G"],
+    }
+
+
+def _espn_payload() -> dict:
+    return {
+        "events": [
+            {
+                "competitions": [
+                    {
+                        "competitors": [
+                            {"homeAway": "home", "team": {"abbreviation": "EDM"}},
+                            {"homeAway": "away", "team": {"abbreviation": "COL"}},
+                        ],
+                        "odds": [
+                            {
+                                "provider": {"name": "ESPN BET"},
+                                "overUnder": 6.5,
+                                "overOdds": -105,
+                                "underOdds": -115,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
 
 
 def _valid_report() -> dict:
@@ -271,3 +437,126 @@ def test_fastapi_serves_report_json_and_mounts_web_static(
     validate_public_report(demo)
     assert len(demo["roster"]) >= 4
     assert len(demo["games"]) >= 2
+
+
+def test_late_night_rollover_advances_to_next_slate_and_ingests_finished_today() -> (
+    None
+):
+    payload = _schedule_payload()
+
+    def fetcher(url: str) -> dict:
+        assert "/schedule/" in url
+        return payload
+
+    active, scheduled, completed = refresh.resolve_active_slate(
+        "2026-10-23", nhl_fetcher=fetcher
+    )
+    assert active == "2026-10-24"
+    assert "2026-10-23" in completed
+    assert {g.game_id for g in scheduled} == {9002}
+    assert scheduled[0].home_abbr == "EDM"
+    assert scheduled[0].away_abbr == "COL"
+
+
+def test_two_fantasy_teams_and_point_scorers_in_report(tmp_path: Path) -> None:
+    out = refresh.main(
+        [
+            "--db-path",
+            str(tmp_path / "wh.sqlite3"),
+            "--output",
+            str(tmp_path / "report.json"),
+            "--demo",
+        ]
+    )
+    report = json.loads(Path(out).read_text())
+    validate_public_report(report)
+
+    assert report["active_slate_date"] == "2026-10-23"
+    assert len(report["teams"]) == 2
+    keys = {t["team_key"] for t in report["teams"]}
+    assert len(keys) == 2
+    for entry in report["teams"]:
+        assert entry["team_summary"]["team_name"]
+        assert len(entry["roster"]) >= 4
+        assert entry["recommendation"]["action"] in {
+            "RECOMMEND_SWAP",
+            "HOLD_ASSET",
+        }
+        assert len(entry["waiver_targets"]) >= 1
+    # Top-level sections stay synced to teams[0].
+    assert report["roster"] == report["teams"][0]["roster"]
+    assert report["recommendation"] == report["teams"][0]["recommendation"]
+    assert report["free_agents"] == report["teams"][0]["waiver_targets"]
+
+    scorers = report["point_scorers"]
+    assert len(scorers) >= 4
+    probs = [sc["prob_point"] for sc in scorers]
+    assert probs == sorted(probs, reverse=True)
+    for sc in scorers:
+        assert 0 < sc["prob_goal"] <= sc["prob_point"] < 1.0
+        assert 0 < sc["prob_assist"] < 1.0
+        assert isinstance(sc["market_point_odds"], int)
+        assert isinstance(sc["market_goal_odds"], int)
+        assert isinstance(sc["market_assist_odds"], int)
+        assert isinstance(sc["point_ev"], float)
+        assert isinstance(sc["goal_ev"], float)
+        assert isinstance(sc["assist_ev"], float)
+        assert sc["best_prop_market"] in {"POINTS", "GOALS", "ASSISTS"}
+        assert isinstance(sc["best_prop_odds"], int)
+    assert any(
+        sc["is_positive_ev"] is True and sc["best_prop_ev"] >= 0.035 for sc in scorers
+    )
+
+
+def test_sync_live_nhl_slate_projects_tonights_real_matchups(
+    tmp_path: Path,
+) -> None:
+    schedule = _schedule_payload()
+    boxscore = _boxscore_payload()
+    espn = _espn_payload()
+    rosters = {
+        "EDM": _roster_payload([101, 102, 103, 104, 105, 106, 197]),
+        "COL": _roster_payload([201, 202, 203, 204, 205, 206, 297]),
+    }
+
+    def fetcher(url: str) -> dict:
+        if "espn" in url or "scoreboard" in url:
+            return espn
+        if "/boxscore" in url:
+            return boxscore
+        for abbr, payload in rosters.items():
+            if f"/roster/{abbr}/" in url:
+                return payload
+        if "/schedule/" in url:
+            return schedule
+        raise AssertionError(f"unexpected fetch {url}")
+
+    conn = db.init_db(tmp_path / "live.sqlite3")
+    try:
+        active, scheduled = refresh.sync_live_nhl_slate(
+            conn, "2026-10-23", nhl_fetcher=fetcher
+        )
+        assert active == "2026-10-24"
+        slate_matchups = {
+            g.game_id: (g.home_team_id, g.away_team_id) for g in scheduled
+        }
+        report = refresh.run_warehouse_pipeline(
+            conn,
+            as_of_date=active,
+            active_slate_date=active,
+            slate_matchups=slate_matchups,
+        )
+    finally:
+        conn.close()
+
+    validate_public_report(report)
+    assert report["active_slate_date"] == "2026-10-24"
+    assert len(report["teams"]) == 2
+    assert len(report["games"]) >= 1
+    assert all(g["line"] > 0 and g["expected_total"] > 0 for g in report["games"])
+    assert len(report["point_scorers"]) >= 4
+    # Consensus line from ESPN flowed into the market item.
+    game = next(g for g in report["games"] if g["game_id"] == 9002)
+    assert game["line"] == 6.5
+    assert game["home_abbr"] == "EDM"
+    assert game["away_abbr"] == "COL"

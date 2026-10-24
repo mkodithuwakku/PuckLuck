@@ -414,7 +414,7 @@ Before writing any application code in the new repository, Agent 1 MUST initiali
 - [x] **Phase 6: End-to-End Warehouse Orchestration, Yahoo-Optional Mode & Live Server Mount**
   - Wire `scripts/refresh.py` to execute the full warehouse-to-report pipeline (`FeatureBuilder` → `ComponentRidgeModel` → `ScoringRescorer` → `solve_best_stream` + `price_total_goals` → `dist/report.json`) with Yahoo-optional fallback (`DEFAULT_STAT_WEIGHTS` + `--demo` warehouse seeder).
   - Mount `web/` static assets and `/report.json` on `api/server.py` so `http://127.0.0.1:8877/` serves the live interactive PWA out of the box.
-- [ ] **Phase 7A: Live NHL Slate Rollover, Consensus Lines, Two-Team Fantasy & Player Prop +EV Backend**
+- [x] **Phase 7A: Live NHL Slate Rollover, Consensus Lines, Two-Team Fantasy & Player Prop +EV Backend**
   - Wire `scripts/refresh.py --live` with late-night rollover (`resolve_active_slate`), open-source consensus lines (`fetch_open_consensus_lines`), 2-team fantasy bundles (`report.teams`), and Point/Goal/Assist scorer Poisson probabilities + consensus prop `+EV` screening (`report.point_scorers`).
 - [ ] **Phase 7B: Two-Team Connected UI, Point Scorers Tab & Live Auto-Refresh Polling (`web/`)**
   - Add 2-team switcher in header connecting `01 Roster` and `02 Add / Drop` (with team-specific waiver targets), replace `04 Free Agents` with `04 Point Scorers` (Goals, Assists, Points + `+EV` prop flags), and add automatic client-side report polling.
