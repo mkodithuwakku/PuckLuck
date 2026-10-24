@@ -401,7 +401,7 @@ Before writing any application code in the new repository, Agent 1 MUST initiali
 - [x] **Phase 2: Yahoo Fantasy Integration**
   - Implement headless OAuth 2.0 handshake and token persistence.
   - Ingest user rosters, active lineup slots, and league scoring categories.
-- [ ] **Phase 3: Statistical Modeling & Feature Pipeline**
+- [x] **Phase 3: Statistical Modeling & Feature Pipeline**
   - Build `FeatureBuilder` for team pace, possessions, and 15-game EWMA xG.
   - Implement closed-form `ComponentRidge` predictor.
   - Implement the $H$-week asset penalty add/drop solver.

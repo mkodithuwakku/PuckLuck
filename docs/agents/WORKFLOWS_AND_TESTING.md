@@ -60,3 +60,4 @@ signatures, and deterministic test fixtures.
 
 - `docs/runbooks/PHASE_2_INGESTION.md` — Phase 2: Yahoo OAuth 2.0 (`ingestion/yahoo.py`) + Official NHL API (`ingestion/nhl.py`)
 - `docs/runbooks/PHASE_3_FANTASY_ENGINE.md` — Phase 3: FeatureBuilder (`features/builder.py`), ComponentRidge (`models/ridge.py`), H-week Add/Drop Solver (`fantasy/solver.py`)
+- `docs/runbooks/PHASE_4_BETTING_ENGINE.md` — Phase 4: Bivariate Poisson Goal Model (`betting/poisson.py`) + Consensus Odds & +EV Screener (`betting/ev.py`)

@@ -83,3 +83,13 @@ MoneyPuck bulk CSV/parquet ┘                     │
   `dim_teams` (with `TEAM_ALTITUDE_FT` and away-venue preservation), computes
   `compute_rest_days` (`game_date < target_date`), and populates
   `fact_skater_games` and `fact_goalie_games` (skipping `00:00` backups).
+- **Feature Pipeline (`features/builder.py`):** `FeatureBuilder` computes the
+  10-feature vector `FEATURE_NAMES` (15-game EWMA $\alpha = 0.08$ process
+  rates, PP TOI share, opponent relative `DefRtg`, opponent goalie rolling
+  `GSAx/60`, schedule context) and training matrices strictly from rows with
+  `game_date < as_of_date`.
+- **Component Ridge & Solver (`models/ridge.py`, `fantasy/solver.py`):**
+  `ComponentRidgeModel` fits closed-form normal equations per component
+  (`SOG, iXG, G, A, BLK, HIT`) with nonnegative clamping; `ScoringRescorer`
+  maps components through league weights; `evaluate_swap` /
+  `solve_best_stream` enforce the $H$-week asset-depreciation gate.
