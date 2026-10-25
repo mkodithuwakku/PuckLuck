@@ -879,6 +879,15 @@ main.pl-main {
   letter-spacing: 0.09em;
   color: var(--text-secondary);
 }
+.mls-src {
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent-cyan);
+}
+.mls-src-est {
+  color: var(--amber);
+}
 .mls-box b {
   font-size: 16px;
   font-weight: 800;

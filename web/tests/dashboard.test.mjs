@@ -110,6 +110,7 @@ function makeReport(overrides = {}) {
         ev: 0.061,
         is_positive_ev: true,
         best_side: "OVER",
+        line_source: "Draft Kings",
         home_goalie_status: "CONFIRMED",
         away_goalie_status: "PROJECTED",
       },
@@ -457,6 +458,13 @@ test("handles postponed games, zero-shot appearances, and unconfirmed goalies", 
   assert.ok(activeCard.includes("MODEL LEANS OVER"), "missing edge direction");
   assert.ok(activeCard.includes("+0.2"), "missing signed model-line delta");
   assert.ok(activeCard.includes("O 56%"), "missing P(Over) meter label");
+  assert.ok(activeCard.includes("Draft Kings"), "missing line source tag");
+
+  // Missing line_source falls back to an honest EST. LINE tag.
+  const estHtml = renderGameTotalsTab([
+    { ...report.games[0], line_source: undefined },
+  ]);
+  assert.ok(estHtml.includes("EST. LINE"));
 
   const rosterHtml = renderRosterTab(report.roster);
   assert.ok(!rosterHtml.includes("NaN"));
@@ -507,6 +515,7 @@ test("renders point scorers with Goal/Assist/Point probabilities and flags +EV p
   assert.ok(allHtml.includes("PROFIT EDGE:"));
   assert.ok(allHtml.includes("+24.5% EV"));
   assert.ok(allHtml.includes("player-headshot"), "missing scorer headshots");
+  assert.ok(allHtml.includes(" est"), "baseline prop odds not labeled");
 
   // Default ALL/POINTS sort: McDavid (81%) > MacKinnon (75%) > Matthews (69%)
   const mcdIdx = allHtml.indexOf("Connor McDavid");

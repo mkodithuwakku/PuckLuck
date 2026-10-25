@@ -333,7 +333,7 @@ function totalPick(g) {
       g.home_abbr
     )} · Model ${fmt1(g.expected_total)} vs Line ${fmt1(g.line)} · ${Math.round(
       prob * 100
-    )}%</div>
+    )}%${priceSourceNote(g.line_source)}</div>
   </div>
   <div class="pick-edge ${evTier(g.ev)}"><b>${fmtSignedPct(g.ev)}</b><small>EV</small></div>
 </div>`,
@@ -349,6 +349,15 @@ const PROP_MARKET_LABELS = {
 function propMarketLabel(market) {
   const key = String(market || "").toUpperCase();
   return PROP_MARKET_LABELS[key] || String(market || "1+ Point");
+}
+
+/* True when a price is model-estimated rather than a real book line. */
+function isEstimatedPrice(source) {
+  return !source || /consensus|baseline|demo/i.test(String(source));
+}
+
+function priceSourceNote(source) {
+  return isEstimatedPrice(source) ? " · est. price" : "";
 }
 
 function propPick(p, season) {
@@ -379,7 +388,7 @@ function propPick(p, season) {
       p.team_abbr || ""
     )}${opp} · Prob ${Math.round(prob * 100)}%${
       fair !== undefined ? ` · Fair ${fmtOdds(fair)}` : ""
-    }</div>
+    }${priceSourceNote(p.odds_source)}</div>
   </div>
   <div class="pick-edge ${evTier(p.best_prop_ev)}"><b>${fmtSignedPct(
     p.best_prop_ev
@@ -404,7 +413,9 @@ function gameLean(g) {
     )}</div>
     <div class="pick-sub">${esc(g.away_abbr)} @ ${esc(
       g.home_abbr
-    )} · Model ${fmt1(g.expected_total)} (${fmtSigned1(delta)})</div>
+    )} · Model ${fmt1(g.expected_total)} (${fmtSigned1(delta)})${priceSourceNote(
+      g.line_source
+    )}</div>
   </div>
   <div class="pick-edge edge-cool"><b>${fmtSigned1(delta)}</b><small>edge</small></div>
 </div>`,
@@ -797,6 +808,11 @@ export function renderGameTotalsTab(games = []) {
             )}</strong> (${fmtSignedPct(g.ev)} EV)</div>`
           : "";
 
+      const lineSrc = String(g.line_source || "consensus");
+      const lineSrcTag = isEstimatedPrice(lineSrc)
+        ? `<span class="mls-src mls-src-est">EST. LINE</span>`
+        : `<span class="mls-src">${esc(lineSrc)}</span>`;
+
       const metrics = postponed
         ? ""
         : `<div class="model-line-strip ${dirClass}">
@@ -806,7 +822,7 @@ export function renderGameTotalsTab(games = []) {
     <div class="mls-edge"><b>${fmtSigned1(delta)}</b><span>${dirLabel}</span></div>
     <div class="mls-box"><span class="mls-label">LINE</span><b>${fmt1(
       line
-    )}</b></div>
+    )}</b>${lineSrcTag}</div>
   </div>
   <div class="over-meter ${meterClass}">
     <div class="over-meter-labels"><span>U ${probUnderPct}%</span><span>O ${probOverPct}%</span></div>
@@ -932,6 +948,7 @@ export function renderPointScorersTab(
           ? p.projected_points
           : Number(p.projected_goals || 0) + Number(p.projected_assists || 0);
 
+      const estTag = isEstimatedPrice(p.odds_source) ? " est" : "";
       const evBadge = p.is_positive_ev === true ? badge("+EV") : "";
       const profitBanner =
         p.is_positive_ev === true
@@ -939,7 +956,9 @@ export function renderPointScorersTab(
               propMarketLabel(p.best_prop_market)
             )} ${fmtOdds(p.best_prop_odds)}</strong> (${fmtSignedPct(
               p.best_prop_ev
-            )} EV · Fair ${fmtOdds(p.fair_point_odds || p.fair_goal_odds)})</div>`
+            )} EV · Fair ${fmtOdds(
+              p.fair_point_odds || p.fair_goal_odds
+            )}${estTag ? " · est. price" : ""})</div>`
           : "";
 
       const pill = (label, prob, odds, extraClass = "") => `<div class="prob-pill ${probTier(
@@ -947,7 +966,7 @@ export function renderPointScorersTab(
       )}">
       <div class="prob-pill-top"><span>${label} <b>${Math.round(
         prob * 100
-      )}%</b></span><span class="odds-tag">${fmtOdds(odds)}</span></div>
+        )}%</b></span><span class="odds-tag">${fmtOdds(odds)}${estTag}</span></div>
       <div class="prob-bar"><div class="prob-fill ${extraClass}" style="width:${Math.min(
         100,
         Math.round(prob * 100)

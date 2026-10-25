@@ -141,6 +141,7 @@ GAME_ITEM_ALLOWLIST: FrozenSet[str] = frozenset(
         "is_positive_ev",
         "home_goalie_status",
         "away_goalie_status",
+        "line_source",
     }
 )
 FREE_AGENT_ALLOWLIST: FrozenSet[str] = frozenset(
@@ -198,6 +199,7 @@ POINT_SCORER_ALLOWLIST: FrozenSet[str] = frozenset(
         "best_prop_odds",
         "best_prop_ev",
         "is_positive_ev",
+        "odds_source",
     }
 )
 FANTASY_TEAM_ENTRY_ALLOWLIST: FrozenSet[str] = frozenset(
@@ -990,6 +992,7 @@ def _market_game_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     if market_col:
         marks = ", ".join(f"'{m}'" for m in _PROP_MARKETS)
         prop_filter = f" WHERE {market_col} IS NULL OR {market_col} NOT IN ({marks})"
+    sb_col = _pick(columns, "sportsbook", "book")
     rows = [
         dict(zip(columns, r))
         for r in conn.execute(
@@ -1004,12 +1007,18 @@ def _market_game_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         group = by_game[gid]
         lines = sorted(float(g[line_col]) for g in group)
         mid = lines[len(lines) // 2] if len(lines) % 2 else lines[len(lines) // 2 - 1]
+        books = [str(g.get(sb_col) or "") for g in group] if sb_col else []
+        book = next(
+            (b for b in books if b and b.lower() not in ("consensus", "baseline")),
+            books[0] if books else "",
+        )
         consensus.append(
             {
                 "game_id": gid,
                 "line": mid,
                 "over_odds": max(int(g[over_col]) for g in group),
                 "under_odds": max(int(g[under_col]) for g in group),
+                "sportsbook": book or "consensus",
             }
         )
     return consensus
@@ -1221,9 +1230,13 @@ def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int
     over_col = _pick(columns, "over_odds", "over_price")
     if not all((market_col, target_col, over_col)):
         return {}
+    sb_col = _pick(columns, "sportsbook", "book")
     marks = ", ".join(f"'{m}'" for m in _PROP_MARKETS)
+    select = f"{market_col} AS m, {over_col} AS o"
+    if sb_col:
+        select += f", {sb_col} AS sb"
     rows = conn.execute(
-        f"SELECT {market_col} AS m, {over_col} AS o FROM fact_market_lines "
+        f"SELECT {select} FROM fact_market_lines "
         f"WHERE {target_col} = ? AND {market_col} IN ({marks})",
         (str(player_id),),
     ).fetchall()
@@ -1232,8 +1245,11 @@ def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int
         "PLAYER_GOALS": "goal",
         "PLAYER_ASSISTS": "assist",
     }
-    out: Dict[str, int] = {}
-    for market, odds in rows:
+    out: Dict[str, Any] = {}
+    for row in rows:
+        market, odds = row[0], row[1]
+        if sb_col and row[2]:
+            out["source"] = str(row[2])
         key = key_map.get(str(market).upper())
         if key:
             out[key] = _to_int(odds, -110)
@@ -1305,6 +1321,7 @@ def compute_point_scorer_projection(
         "best_prop_odds": int(best_odds),
         "best_prop_ev": round(float(best_ev), 4),
         "is_positive_ev": bool(best_ev >= 0.035),
+        "odds_source": str((market_odds or {}).get("source") or "baseline"),
     }
 
 
@@ -1359,7 +1376,7 @@ def _seed_baseline_props(conn: sqlite3.Connection, slate_date: str) -> None:
             rows.append(
                 {
                     "game_id": 0,
-                    "sportsbook": "consensus",
+                    "sportsbook": "baseline",
                     "market_type": market,
                     "market": market,
                     "target_id": str(int(player_id)),
@@ -1873,6 +1890,7 @@ def _build_game_items(
                 "best_side": best_side,
                 "ev": round(best_ev, 4),
                 "is_positive_ev": bool(best_ev >= 0.035),
+                "line_source": str(market.get("sportsbook") or "consensus"),
                 "home_goalie_status": "CONFIRMED",
                 "away_goalie_status": "PROJECTED",
             }
