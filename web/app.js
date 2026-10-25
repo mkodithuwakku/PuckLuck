@@ -1,9 +1,12 @@
-/* PuckLuck dashboard renderer (SRS §6.1/§6.2, Phase 7B).
+/* PuckLuck dashboard renderer — betting-hub edition.
  *
  * Pure ES module: every render function returns an HTML string so the
  * same code runs in the browser and under `node --test`. Browser glue
  * (fetch + tab/team/filter binding + auto-refresh) is guarded behind
  * `typeof document`.
+ *
+ * Tabs: Picks (landing +EV board), Players (point scorers),
+ * Totals (game totals), Roster, Moves (add/drop solver).
  */
 
 export const STALE_THRESHOLD_HOURS = 26;
@@ -49,10 +52,11 @@ const DEFAULT_TEAM_COLORS = ["#4da6ff", "#1c2026"];
 const SLOT_ORDER = ["C", "LW", "RW", "D", "UTIL", "G", "BN", "IR", "IR+"];
 
 const TAB_DEFS = [
-  ["roster", "01 Roster"],
-  ["adddrop", "02 Add / Drop"],
-  ["totals", "03 Game Totals"],
-  ["scorers", "04 Point Scorers"],
+  ["picks", "Picks"],
+  ["scorers", "Players"],
+  ["totals", "Totals"],
+  ["roster", "Roster"],
+  ["adddrop", "Moves"],
 ];
 
 const SCORER_FILTERS = ["ALL", "POINTS", "GOALS", "ASSISTS", "+EV"];
@@ -103,9 +107,25 @@ function fmtOdds(value) {
   return rounded > 0 ? `+${rounded}` : String(rounded);
 }
 
+function fmtGameTime(iso) {
+  const d = new Date(iso || "");
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 function getTeamColors(abbr) {
   const upper = String(abbr || "").toUpperCase().trim();
   return TEAM_COLORS[upper] || DEFAULT_TEAM_COLORS;
+}
+
+/* NHL season slug ("20262027") from a slate/report ISO date so headshot
+ * URLs resolve to the correct season directory on assets.nhle.com. */
+export function seasonSlug(isoDate) {
+  const d = new Date(isoDate || Date.now());
+  if (Number.isNaN(d.getTime())) return "latest";
+  const year = d.getUTCFullYear();
+  const start = d.getUTCMonth() >= 6 ? year : year - 1;
+  return `${start}${start + 1}`;
 }
 
 export function renderTeamLogo(abbr) {
@@ -116,9 +136,37 @@ export function renderTeamLogo(abbr) {
     upper
   )}_dark.svg" alt="${esc(
     upper
-  )}" loading="lazy" onerror="this.style.display='none'" /><span class="team-Initials">${esc(
+  )}" loading="lazy" onload="this.nextElementSibling.style.display='none'" onerror="this.style.display='none'" /><span class="team-initials">${esc(
     upper
   )}</span></span>`;
+}
+
+function playerInitials(name) {
+  const parts = String(name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return "?";
+  const first = parts[0][0] || "";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
+  return (first + last).toUpperCase() || "?";
+}
+
+export function renderPlayerHeadshot(player, season = "") {
+  const [primary] = getTeamColors(player?.team_abbr);
+  const initials = esc(playerInitials(player?.display_name));
+  const id = Number(player?.player_id);
+  const team = String(player?.team_abbr || "")
+    .toUpperCase()
+    .trim();
+  const slug = String(season || "").trim() || "latest";
+  const img =
+    Number.isFinite(id) && id > 0 && team
+      ? `<img class="headshot-img" src="https://assets.nhle.com/mugs/nhl/${esc(
+          slug
+        )}/${esc(team)}/${id}.png" alt="" loading="lazy" onload="this.nextElementSibling.style.display='none'" onerror="this.style.display='none'" />`
+      : "";
+  return `<span class="player-headshot" style="--team-color:${primary}">${img}<span class="hs-initials">${initials}</span></span>`;
 }
 
 function badge(label) {
@@ -140,6 +188,20 @@ function badge(label) {
 
 function goalieBadge(status) {
   return status ? badge(String(status).toUpperCase()) : "";
+}
+
+function evTier(ev) {
+  const e = Number(ev || 0);
+  if (e >= 0.08) return "edge-hot";
+  if (e >= 0.03) return "edge-warm";
+  return "edge-cool";
+}
+
+function probTier(prob) {
+  const p = Number(prob || 0);
+  if (p >= 0.7) return "tier-hot";
+  if (p >= 0.5) return "tier-warm";
+  return "tier-cool";
 }
 
 export function isReportStale(
@@ -183,15 +245,6 @@ export function renderHeader(
   report,
   { nowMs = Date.now(), teamIndex = 0 } = {}
 ) {
-  const activeTeam = resolveActiveTeam(report, teamIndex);
-  const summary = activeTeam.team_summary ?? {};
-  const initials = esc(summary.team_initials || "PL");
-  const teamName = esc(summary.team_name || "PuckLuck");
-  const leagueName = esc(summary.league_name || "");
-  const limit = Number(summary.adds_limit ?? 0);
-  const used = Number(summary.adds_used ?? 0);
-  const addsLeft = Number.isFinite(limit) ? Math.max(0, limit - used) : 0;
-  const matchup = esc(summary.matchup_score || "");
   const slateDate = esc(report?.active_slate_date || "");
 
   const staleHours = Number(report?.stale_after_hours) || STALE_THRESHOLD_HOURS;
@@ -222,15 +275,9 @@ export function renderHeader(
 
   return `<header class="pl-header">
   <div class="pl-header-top">
-    <div class="pl-avatar">${initials}</div>
-    <div class="pl-team-meta">
-      <span class="pl-team-name">${teamName}</span>
-      <span class="pl-league-name">${leagueName}</span>
-    </div>
+    <div class="pl-brand"><span class="pl-brand-mark">PL</span><span class="pl-brand-name">PuckLuck</span></div>
     <div class="pl-header-pills">
-      <span class="pill">Adds Left: <strong>${addsLeft}/${fmtInt(limit)}</strong></span>
-      ${matchup ? `<span class="pill pill-matchup">${matchup}</span>` : ""}
-      ${slateDate ? `<span class="pill pill-slate">Slate: <strong>${slateDate}</strong></span>` : ""}
+      ${slateDate ? `<span class="pill pill-slate">Slate <strong>${slateDate}</strong></span>` : ""}
       <button type="button" class="pill pill-live" id="sync-now-btn" title="Refresh report now"><span class="live-dot"></span>LIVE · 5m Sync</button>
     </div>
   </div>
@@ -239,12 +286,211 @@ export function renderHeader(
 </header>`;
 }
 
+/* Compact fantasy context strip shown inside the Roster / Moves panels so
+ * the betting tabs stay clean while team state remains one glance away. */
+function renderFantasyContext(activeTeam) {
+  const s = activeTeam?.team_summary || {};
+  if (!s.team_name) return "";
+  const limit = Number(s.adds_limit ?? 0);
+  const used = Number(s.adds_used ?? 0);
+  const addsLeft = Number.isFinite(limit) ? Math.max(0, limit - used) : 0;
+  return `<div class="fantasy-context">
+  <span class="fc-avatar">${esc(s.team_initials || "PL")}</span>
+  <div class="fc-meta"><b>${esc(s.team_name)}</b><span>${esc(
+    s.league_name || ""
+  )}</span></div>
+  <div class="fc-pills">
+    <span class="pill">Adds <strong>${addsLeft}/${fmtInt(limit)}</strong></span>
+    ${
+      s.matchup_score
+        ? `<span class="pill pill-matchup">${esc(s.matchup_score)}</span>`
+        : ""
+    }
+  </div>
+</div>`;
+}
+
+/* ---------- Best Picks (landing +EV board) ---------- */
+
+function totalPick(g) {
+  const side = String(g.best_side || "OVER").toUpperCase();
+  const isUnder = side === "UNDER";
+  const odds = isUnder ? g.under_odds : g.over_odds;
+  const prob = Number(isUnder ? g.prob_under : g.prob_over) || 0;
+  const [primary] = getTeamColors(g.home_abbr);
+  return {
+    ev: Number(g.ev || 0),
+    sortProb: prob,
+    html: `<div class="pick-row pick-total" style="--team-color:${primary}">
+  <span class="crest-pair">${renderTeamLogo(g.away_abbr)}${renderTeamLogo(
+      g.home_abbr
+    )}</span>
+  <div class="pick-main">
+    <div class="pick-title"><span class="pick-tag tag-total">TOTAL</span>${esc(
+      side
+    )} ${fmt1(g.line)} <span class="pick-odds">${fmtOdds(odds)}</span></div>
+    <div class="pick-sub">${esc(g.away_abbr)} @ ${esc(
+      g.home_abbr
+    )} · Model ${fmt1(g.expected_total)} vs Line ${fmt1(g.line)} · ${Math.round(
+      prob * 100
+    )}%</div>
+  </div>
+  <div class="pick-edge ${evTier(g.ev)}"><b>${fmtSignedPct(g.ev)}</b><small>EV</small></div>
+</div>`,
+  };
+}
+
+const PROP_MARKET_LABELS = {
+  GOALS: "Anytime Goal",
+  ASSISTS: "1+ Assist",
+  POINTS: "1+ Point",
+};
+
+function propMarketLabel(market) {
+  const key = String(market || "").toUpperCase();
+  return PROP_MARKET_LABELS[key] || String(market || "1+ Point");
+}
+
+function propPick(p, season) {
+  const rawMarket = String(p.best_prop_market || "POINTS");
+  const market = propMarketLabel(rawMarket);
+  const prob =
+    /goal/i.test(rawMarket)
+      ? Number(p.prob_goal || 0)
+      : /assist/i.test(rawMarket)
+        ? Number(p.prob_assist || 0)
+        : Number(p.prob_point || 0);
+  const fair =
+    (/goal/i.test(rawMarket) && p.fair_goal_odds) ||
+    (/assist/i.test(rawMarket) && p.fair_assist_odds) ||
+    p.fair_point_odds;
+  const [primary] = getTeamColors(p.team_abbr);
+  const opp = p.opponent_abbr ? ` vs ${esc(p.opponent_abbr)}` : "";
+  return {
+    ev: Number(p.best_prop_ev || 0),
+    sortProb: prob,
+    html: `<div class="pick-row pick-prop" style="--team-color:${primary}">
+  ${renderPlayerHeadshot(p, season)}
+  <div class="pick-main">
+    <div class="pick-title"><span class="pick-tag tag-prop">PROP</span>${esc(
+      market
+    )} <span class="pick-odds">${fmtOdds(p.best_prop_odds)}</span></div>
+    <div class="pick-sub">${esc(p.display_name)} · ${esc(
+      p.team_abbr || ""
+    )}${opp} · Prob ${Math.round(prob * 100)}%${
+      fair !== undefined ? ` · Fair ${fmtOdds(fair)}` : ""
+    }</div>
+  </div>
+  <div class="pick-edge ${evTier(p.best_prop_ev)}"><b>${fmtSignedPct(
+    p.best_prop_ev
+  )}</b><small>EV</small></div>
+</div>`,
+  };
+}
+
+function gameLean(g) {
+  const delta = Number(g.expected_total || 0) - Number(g.line || 0);
+  const lean = delta >= 0 ? "OVER" : "UNDER";
+  const [primary] = getTeamColors(g.home_abbr);
+  return {
+    ev: Math.abs(delta),
+    html: `<div class="pick-row pick-lean" style="--team-color:${primary}">
+  <span class="crest-pair">${renderTeamLogo(g.away_abbr)}${renderTeamLogo(
+      g.home_abbr
+    )}</span>
+  <div class="pick-main">
+    <div class="pick-title"><span class="pick-tag tag-lean">LEAN</span>${lean} ${fmt1(
+      g.line
+    )}</div>
+    <div class="pick-sub">${esc(g.away_abbr)} @ ${esc(
+      g.home_abbr
+    )} · Model ${fmt1(g.expected_total)} (${fmtSigned1(delta)})</div>
+  </div>
+  <div class="pick-edge edge-cool"><b>${fmtSigned1(delta)}</b><small>edge</small></div>
+</div>`,
+  };
+}
+
+function scorerLean(p, season) {
+  const prob = Number(p.prob_point || 0);
+  const [primary] = getTeamColors(p.team_abbr);
+  const opp = p.opponent_abbr ? ` vs ${esc(p.opponent_abbr)}` : "";
+  return {
+    ev: prob,
+    html: `<div class="pick-row pick-lean" style="--team-color:${primary}">
+  ${renderPlayerHeadshot(p, season)}
+  <div class="pick-main">
+    <div class="pick-title"><span class="pick-tag tag-lean">LEAN</span>${esc(
+      p.display_name
+    )} 1+ Pt</div>
+    <div class="pick-sub">${esc(p.team_abbr || "")}${opp} · Prob ${Math.round(
+      prob * 100
+    )}%</div>
+  </div>
+  <div class="pick-edge edge-cool"><b>${Math.round(
+    prob * 100
+  )}%</b><small>prob</small></div>
+</div>`,
+  };
+}
+
+export function renderBestPicksTab(
+  games = [],
+  pointScorers = [],
+  { season = "" } = {}
+) {
+  const activeGames = (games || []).filter(
+    (g) => String(g.status || "").toUpperCase() !== "POSTPONED"
+  );
+  const plays = [
+    ...activeGames.filter((g) => g.is_positive_ev === true).map(totalPick),
+    ...(pointScorers || [])
+      .filter((p) => p.is_positive_ev === true)
+      .map((p) => propPick(p, season)),
+  ].sort((a, b) => b.ev - a.ev || b.sortProb - a.sortProb);
+
+  let rows = plays
+    .map(
+      (pick, i) =>
+        `<div class="pick-wrap"><span class="pick-rank">${i + 1}</span>${pick.html}</div>`
+    )
+    .join("");
+
+  if (plays.length < 5) {
+    const leans = [
+      ...activeGames
+        .filter((g) => g.is_positive_ev !== true)
+        .map(gameLean),
+      ...(pointScorers || [])
+        .filter((p) => p.is_positive_ev !== true)
+        .map((p) => scorerLean(p, season)),
+    ]
+      .sort((a, b) => b.ev - a.ev)
+      .slice(0, Math.max(0, 8 - plays.length));
+    if (leans.length) {
+      rows += `<div class="section-title picks-subhead">Model Leans</div>${leans
+        .map((l) => `<div class="pick-wrap">${l.html}</div>`)
+        .join("")}`;
+    }
+  }
+
+  return `<section class="tab-panel" data-panel="picks">
+  <div class="section-title">Today's Top Plays</div>
+  ${
+    rows ||
+    `<div class="empty-state">No edges on tonight's slate — check back closer to puck drop.</div>`
+  }
+</section>`;
+}
+
+/* ---------- Fantasy tabs ---------- */
+
 function slotRank(slot) {
   const idx = SLOT_ORDER.indexOf(String(slot || "").toUpperCase());
   return idx === -1 ? SLOT_ORDER.length : idx;
 }
 
-export function renderRosterTab(roster = []) {
+export function renderRosterTab(roster = [], { season = "", team = null } = {}) {
   const rows = [...roster]
     .sort((a, b) => slotRank(a.selected_slot) - slotRank(b.selected_slot))
     .map((p) => {
@@ -278,7 +524,7 @@ export function renderRosterTab(roster = []) {
   <div class="slot-chip">${esc(p.selected_slot || p.position || "–")}</div>
   <div class="roster-main">
     <div class="player-head">
-      ${renderTeamLogo(p.team_abbr)}
+      ${renderPlayerHeadshot(p, season)}
       <div class="player-title-wrap">
         <div class="player-name">${esc(p.display_name)}${goalieBadge(
           p.goalie_status
@@ -301,12 +547,13 @@ export function renderRosterTab(roster = []) {
     })
     .join("");
   return `<section class="tab-panel" data-panel="roster">
+  ${renderFantasyContext(team)}
   <div class="section-title">Tonight's Roster</div>
   ${rows || `<div class="player-sub">No roster data.</div>`}
 </section>`;
 }
 
-function renderWaiverRow(p) {
+function renderWaiverRow(p, season = "") {
   const [primary] = getTeamColors(p.team_abbr);
   const ixg60 = Number(p.ixg_per60_ewma || 0);
   const icorsi60 = Number(p.icorsi_per60_ewma || 0);
@@ -319,7 +566,7 @@ function renderWaiverRow(p) {
   return `<div class="fa-row" style="--team-color:${primary}">
   <div class="fa-main">
     <div class="player-head">
-      ${renderTeamLogo(p.team_abbr)}
+      ${renderPlayerHeadshot(p, season)}
       <div class="player-title-wrap">
         <div class="player-name">${esc(p.display_name)}</div>
         <div class="player-sub">${esc(p.position || "")} · ${esc(
@@ -362,20 +609,31 @@ function filterAndRankWaivers(list = [], query = "") {
 
 export function renderAddDropTab(
   recommendation,
-  { stale = false, waiverTargets = [], query = "" } = {}
+  {
+    stale = false,
+    waiverTargets = [],
+    query = "",
+    season = "",
+    team = null,
+  } = {}
 ) {
   const rankedWaivers = filterAndRankWaivers(waiverTargets, query);
-  const waiverRows = rankedWaivers.map(renderWaiverRow).join("");
+  const waiverRows = rankedWaivers
+    .map((p) => renderWaiverRow(p, season))
+    .join("");
   const waiverSection = `<div class="waiver-connected-block">
-    <div class="section-title">Available Waiver Streamers for This Team</div>
+    <div class="section-title">Available Waiver Streamers</div>
     <input class="fa-search" id="waiver-search" type="search" placeholder="Search waiver targets by player, team, or position..." value="${esc(
       query
     )}" />
     ${waiverRows || `<div class="player-sub">No waiver streamers match.</div>`}
   </div>`;
 
+  const context = renderFantasyContext(team);
+
   if (!recommendation) {
     return `<section class="tab-panel" data-panel="adddrop">
+  ${context}
   <div class="section-title">Streaming Solver</div>
   <div class="adddrop-card"><div class="player-sub">No recommendation today.</div></div>
   ${waiverSection}
@@ -389,7 +647,7 @@ export function renderAddDropTab(
       : action === "HOLD_ASSET" || action === "HOLD"
         ? badge("HOLD")
         : badge(action || "HOLD");
-  const staleAttrs = stale ? ` stale-disabled" data-stale="true` : "";
+  const staleAttrs = stale ? ` stale-disabled" data-stale="true"` : "";
   const staleNotice = stale
     ? `<div class="stale-banner">STALE DATA — recommendations frozen</div>`
     : "";
@@ -405,8 +663,9 @@ export function renderAddDropTab(
   const depPct = 100 - gainPct;
 
   return `<section class="tab-panel" data-panel="adddrop">
+  ${context}
   <div class="section-title">Streaming Solver</div>
-  <article class="adddrop-card${staleAttrs}">
+  <article class="adddrop-card${staleAttrs}>
     ${staleNotice}
     <div class="adddrop-head">
       <div class="adddrop-pair">
@@ -443,9 +702,12 @@ export function renderAddDropTab(
 </section>`;
 }
 
-export function renderFreeAgentsTab(freeAgents = [], { query = "" } = {}) {
+export function renderFreeAgentsTab(
+  freeAgents = [],
+  { query = "", season = "" } = {}
+) {
   const rows = filterAndRankWaivers(freeAgents, query)
-    .map(renderWaiverRow)
+    .map((p) => renderWaiverRow(p, season))
     .join("");
   return `<section class="tab-panel" data-panel="agents">
   <div class="section-title">Waiver Pool</div>
@@ -456,13 +718,30 @@ export function renderFreeAgentsTab(freeAgents = [], { query = "" } = {}) {
 </section>`;
 }
 
+/* ---------- Game Totals ---------- */
+
 export function renderGameTotalsTab(games = []) {
+  const rank = (g) => {
+    const postponed = String(g.status || "").toUpperCase() === "POSTPONED";
+    if (postponed) return { tier: 2, edge: 0 };
+    if (g.is_positive_ev === true) return { tier: 0, edge: Number(g.ev || 0) };
+    return {
+      tier: 1,
+      edge: Math.abs(Number(g.expected_total || 0) - Number(g.line || 0)),
+    };
+  };
   const cards = [...games]
-    .sort((a, b) =>
-      String(a.start_time_utc || "").localeCompare(
-        String(b.start_time_utc || "")
-      )
-    )
+    .sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      return (
+        ra.tier - rb.tier ||
+        rb.edge - ra.edge ||
+        String(a.start_time_utc || "").localeCompare(
+          String(b.start_time_utc || "")
+        )
+      );
+    })
     .map((g) => {
       const postponed =
         String(g.status || "").toUpperCase() === "POSTPONED";
@@ -475,54 +754,84 @@ export function renderGameTotalsTab(games = []) {
         : g.status && g.status !== "Scheduled"
           ? badge(String(g.status).toUpperCase())
           : "";
-      const time = String(g.start_time_utc || "").slice(11, 16);
+      const time = fmtGameTime(g.start_time_utc);
       const goalies = [
         `${esc(g.away_abbr)} ${goalieBadge(g.away_goalie_status)}`,
         `${esc(g.home_abbr)} ${goalieBadge(g.home_goalie_status)}`,
       ].join(" · ");
 
       const expTotal = Number(g.expected_total || 0);
+      const line = Number(g.line || 0);
+      const delta = expTotal - line;
+      const dirClass =
+        delta > 0.05 ? "edge-over" : delta < -0.05 ? "edge-under" : "edge-even";
+      const dirLabel =
+        delta > 0.05
+          ? "MODEL LEANS OVER"
+          : delta < -0.05
+            ? "MODEL LEANS UNDER"
+            : "MODEL ON LINE";
+      const probOver = Number(g.prob_over || 0);
+      const probOverPct = Math.round(probOver * 100);
+      const probUnderPct = 100 - probOverPct;
+      const meterClass =
+        probOver >= 0.55
+          ? "meter-over"
+          : probOver <= 0.45
+            ? "meter-under"
+            : "meter-even";
       const lamAway = Number.isFinite(Number(g.lambda_away))
         ? Number(g.lambda_away)
         : expTotal * 0.48;
       const lamHome = Number.isFinite(Number(g.lambda_home))
         ? Number(g.lambda_home)
         : Math.max(0, expTotal - lamAway);
-      const lamSum = Math.max(0.1, lamAway + lamHome);
-      const awayShare = Math.round((lamAway / lamSum) * 100);
-      const homeShare = 100 - awayShare;
-      const probOverPct = Math.round(Number(g.prob_over || 0) * 100);
 
+      const bestSide = String(g.best_side || "OVER").toUpperCase();
       const bestPickBanner =
         g.is_positive_ev === true && !postponed
           ? `<div class="ev-pick-banner">BEST PICK: <strong>${esc(
-              g.best_side || "OVER"
-            )} ${fmt1(g.line)}</strong> (${fmtSignedPct(g.ev)} EV)</div>`
+              bestSide
+            )} ${fmt1(g.line)} ${fmtOdds(
+              bestSide === "UNDER" ? g.under_odds : g.over_odds
+            )}</strong> (${fmtSignedPct(g.ev)} EV)</div>`
           : "";
 
       const metrics = postponed
         ? ""
-        : `<div class="lambda-split" style="--away-color:${awayColor};--home-color:${homeColor}">
-    <div class="lambda-labels">
-      <span>${esc(g.away_abbr)} λ <b>${fmt2(lamAway)}</b></span>
-      <span>P(Over) <b>${probOverPct}%</b></span>
-      <span>${esc(g.home_abbr)} λ <b>${fmt2(lamHome)}</b></span>
-    </div>
-    <div class="lambda-bar">
-      <span class="lambda-away" style="width:${awayShare}%"></span>
-      <span class="lambda-home" style="width:${homeShare}%"></span>
-    </div>
+        : `<div class="model-line-strip ${dirClass}">
+    <div class="mls-box"><span class="mls-label">MODEL</span><b>${fmt1(
+      expTotal
+    )}</b></div>
+    <div class="mls-edge"><b>${fmtSigned1(delta)}</b><span>${dirLabel}</span></div>
+    <div class="mls-box"><span class="mls-label">LINE</span><b>${fmt1(
+      line
+    )}</b></div>
+  </div>
+  <div class="over-meter ${meterClass}">
+    <div class="over-meter-labels"><span>U ${probUnderPct}%</span><span>O ${probOverPct}%</span></div>
+    <div class="over-bar"><i class="over-mid"></i><div class="over-fill" style="width:${Math.min(
+      100,
+      Math.max(0, probOverPct)
+    )}%"></div></div>
   </div>
   <div class="game-metrics">
-    <span>Model <b>${fmt1(g.expected_total)}</b></span>
-    <span>Line <b>${fmt1(g.line)}</b></span>
-    <span>P(Over) <b>${fmt2(g.prob_over)}</b></span>
-    <span>O ${fmtOdds(g.over_odds)} / U ${fmtOdds(g.under_odds)}</span>
+    <span class="odds-chip${
+      bestSide === "OVER" ? " odds-chip-best" : ""
+    }">O ${fmtOdds(g.over_odds)}</span>
+    <span class="odds-chip${
+      bestSide === "UNDER" ? " odds-chip-best" : ""
+    }">U ${fmtOdds(g.under_odds)}</span>
+    <span class="lambda-chip">${esc(g.away_abbr)} λ <b>${fmt2(
+      lamAway
+    )}</b> · ${esc(g.home_abbr)} λ <b>${fmt2(lamHome)}</b></span>
     ${evBadge}
   </div>
   ${bestPickBanner}`;
 
-      return `<article class="game-card">
+      return `<article class="game-card${
+        g.is_positive_ev === true && !postponed ? " game-card-ev" : ""
+      }">
   <div class="game-card-accent" style="--away-color:${awayColor};--home-color:${homeColor}"></div>
   <div class="game-top">
     <span class="game-teams">${renderTeamLogo(g.away_abbr)} ${esc(
@@ -530,7 +839,7 @@ export function renderGameTotalsTab(games = []) {
     )} <span class="at-sep">@</span> ${renderTeamLogo(g.home_abbr)} ${esc(
         g.home_abbr
       )}</span>
-    <span class="game-time">${esc(time)} UTC ${statusBadge}</span>
+    <span class="game-time">${esc(time)} ${statusBadge}</span>
   </div>
   ${metrics}
   <div class="game-goalies">${goalies}</div>
@@ -543,9 +852,11 @@ export function renderGameTotalsTab(games = []) {
 </section>`;
 }
 
+/* ---------- Point Scorers ---------- */
+
 export function renderPointScorersTab(
   pointScorers = [],
-  { query = "", filter = "ALL" } = {}
+  { query = "", filter = "ALL", season = "" } = {}
 ) {
   const q = String(query || "").toLowerCase().trim();
   const activeFilter = SCORER_FILTERS.includes(String(filter).toUpperCase())
@@ -613,9 +924,9 @@ export function renderPointScorersTab(
   const rows = filtered
     .map((p) => {
       const [primary] = getTeamColors(p.team_abbr);
-      const probPtPct = Math.round(Number(p.prob_point || 0) * 100);
-      const probGoalPct = Math.round(Number(p.prob_goal || 0) * 100);
-      const probAstPct = Math.round(Number(p.prob_assist || 0) * 100);
+      const probPt = Number(p.prob_point || 0);
+      const probGoal = Number(p.prob_goal || 0);
+      const probAst = Number(p.prob_assist || 0);
       const projPts =
         p.projected_points !== undefined
           ? p.projected_points
@@ -625,18 +936,30 @@ export function renderPointScorersTab(
       const profitBanner =
         p.is_positive_ev === true
           ? `<div class="scorer-ev-banner">PROFIT EDGE: <strong>${esc(
-              p.best_prop_market || "1+ Point"
+              propMarketLabel(p.best_prop_market)
             )} ${fmtOdds(p.best_prop_odds)}</strong> (${fmtSignedPct(
               p.best_prop_ev
             )} EV · Fair ${fmtOdds(p.fair_point_odds || p.fair_goal_odds)})</div>`
           : "";
+
+      const pill = (label, prob, odds, extraClass = "") => `<div class="prob-pill ${probTier(
+        prob
+      )}">
+      <div class="prob-pill-top"><span>${label} <b>${Math.round(
+        prob * 100
+      )}%</b></span><span class="odds-tag">${fmtOdds(odds)}</span></div>
+      <div class="prob-bar"><div class="prob-fill ${extraClass}" style="width:${Math.min(
+        100,
+        Math.round(prob * 100)
+      )}%"></div></div>
+    </div>`;
 
       return `<div class="scorer-row${
         p.is_positive_ev === true ? " scorer-row-ev" : ""
       }" style="--team-color:${primary}">
   <div class="scorer-top">
     <div class="player-head">
-      ${renderTeamLogo(p.team_abbr)}
+      ${renderPlayerHeadshot(p, season)}
       <div class="player-title-wrap">
         <div class="player-name">${esc(p.display_name)}${evBadge}</div>
         <div class="player-sub">${esc(p.position || "F")} · ${esc(
@@ -649,33 +972,9 @@ export function renderPointScorersTab(
     <div class="fp-col">${fmt2(projPts)}<small>exp Pts</small></div>
   </div>
   <div class="scorer-prob-grid">
-    <div class="prob-pill">
-      <div class="prob-pill-top"><span>1+ Pt: <b>${probPtPct}%</b></span><span class="odds-tag">(${fmtOdds(
-        p.market_point_odds
-      )})</span></div>
-      <div class="prob-bar"><div class="prob-fill" style="width:${Math.min(
-        100,
-        probPtPct
-      )}%"></div></div>
-    </div>
-    <div class="prob-pill">
-      <div class="prob-pill-top"><span>Goal: <b>${probGoalPct}%</b></span><span class="odds-tag">(${fmtOdds(
-        p.market_goal_odds
-      )})</span></div>
-      <div class="prob-bar"><div class="prob-fill prob-fill-goal" style="width:${Math.min(
-        100,
-        probGoalPct
-      )}%"></div></div>
-    </div>
-    <div class="prob-pill">
-      <div class="prob-pill-top"><span>Assist: <b>${probAstPct}%</b></span><span class="odds-tag">(${fmtOdds(
-        p.market_assist_odds
-      )})</span></div>
-      <div class="prob-bar"><div class="prob-fill prob-fill-assist" style="width:${Math.min(
-        100,
-        probAstPct
-      )}%"></div></div>
-    </div>
+    ${pill("1+ Pt:", probPt, p.market_point_odds)}
+    ${pill("Goal:", probGoal, p.market_goal_odds, "prob-fill-goal")}
+    ${pill("Assist:", probAst, p.market_assist_odds, "prob-fill-assist")}
   </div>
   ${profitBanner}
 </div>`;
@@ -689,11 +988,13 @@ export function renderPointScorersTab(
 </section>`;
 }
 
+/* ---------- Dashboard shell ---------- */
+
 export function renderDashboard(
   report,
   {
     nowMs = Date.now(),
-    activeTab = "roster",
+    activeTab = "picks",
     teamIndex = 0,
     query = "",
     scorerQuery = "",
@@ -706,17 +1007,26 @@ export function renderDashboard(
     Number(report?.stale_after_hours) || STALE_THRESHOLD_HOURS
   );
   const activeTeam = resolveActiveTeam(report, teamIndex);
+  const season = seasonSlug(
+    report?.active_slate_date || report?.generated_at || ""
+  );
   const panels = [
-    renderRosterTab(activeTeam.roster),
+    renderBestPicksTab(report?.games || [], report?.point_scorers || [], {
+      season,
+    }),
+    renderPointScorersTab(report?.point_scorers || [], {
+      query: scorerQuery,
+      filter: scorerFilter,
+      season,
+    }),
+    renderGameTotalsTab(report?.games || []),
+    renderRosterTab(activeTeam.roster, { season, team: activeTeam }),
     renderAddDropTab(activeTeam.recommendation, {
       stale,
       waiverTargets: activeTeam.waiver_targets,
       query,
-    }),
-    renderGameTotalsTab(report?.games || []),
-    renderPointScorersTab(report?.point_scorers || [], {
-      query: scorerQuery,
-      filter: scorerFilter,
+      season,
+      team: activeTeam,
     }),
   ];
   const panelHtml = panels
@@ -744,7 +1054,7 @@ ${renderHeader(report, { nowMs, teamIndex })}
 if (typeof document !== "undefined") {
   let report = null;
   let state = {
-    activeTab: "roster",
+    activeTab: "picks",
     teamIndex: 0,
     query: "",
     scorerQuery: "",
@@ -769,7 +1079,7 @@ if (typeof document !== "undefined") {
 
     document.querySelectorAll(".nav-btn").forEach((btn) =>
       btn.addEventListener("click", () => {
-        state.activeTab = btn.dataset.tab || "roster";
+        state.activeTab = btn.dataset.tab || "picks";
         mount();
       })
     );

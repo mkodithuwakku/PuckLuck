@@ -1,4 +1,4 @@
-/* PuckLuck frontend policy suite (SRS §8 Gate 3, Phase 7B).
+/* PuckLuck frontend policy suite (SRS §8 Gate 3, betting-hub overhaul).
  * Run: node --test web/tests/dashboard.test.mjs
  */
 
@@ -11,13 +11,16 @@ import {
   TEAM_COLORS,
   isReportStale,
   renderAddDropTab,
+  renderBestPicksTab,
   renderDashboard,
   renderFreeAgentsTab,
   renderGameTotalsTab,
+  renderPlayerHeadshot,
   renderPointScorersTab,
   renderRosterTab,
   renderTeamLogo,
   resolveActiveTeam,
+  seasonSlug,
 } from "../app.js";
 
 const NOW = Date.parse("2026-10-23T12:00:00Z");
@@ -236,7 +239,7 @@ function makeReport(overrides = {}) {
   };
 }
 
-test("renders roster-first dashboard offline with required visual tokens, team logos, and 04 Point Scorers tab", async () => {
+test("renders picks-first dashboard offline with required visual tokens, logos, headshots, and five tabs", async () => {
   const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
   assert.ok(css.includes("#141619"), "missing deep-charcoal base");
   assert.ok(css.includes("#1c2026"), "missing ice-steel surface");
@@ -252,19 +255,39 @@ test("renders roster-first dashboard offline with required visual tokens, team l
   assert.equal(AUTO_REFRESH_INTERVAL_MS, 300_000);
 
   const logoHtml = renderTeamLogo("EDM");
-  assert.ok(logoHtml.includes("https://assets.nhle.com/logos/nhl/svg/EDM_dark.svg"));
+  assert.ok(
+    logoHtml.includes("https://assets.nhle.com/logos/nhl/svg/EDM_dark.svg")
+  );
   assert.ok(logoHtml.includes("--team-color:#FF4C00"));
+  assert.ok(
+    logoHtml.includes("onload"),
+    "logo must hide initials underlay once loaded"
+  );
+
+  const shotHtml = renderPlayerHeadshot(
+    { player_id: 8478402, display_name: "Connor McDavid", team_abbr: "EDM" },
+    "20262027"
+  );
+  assert.ok(
+    shotHtml.includes(
+      "https://assets.nhle.com/mugs/nhl/20262027/EDM/8478402.png"
+    )
+  );
+  assert.ok(shotHtml.includes(">CM<"), "initials fallback missing");
+
+  assert.equal(seasonSlug("2026-10-23"), "20262027");
+  assert.equal(seasonSlug("2027-02-14"), "20262027");
 
   const html = renderDashboard(makeReport(), { nowMs: NOW });
-  assert.ok(html.includes("01 Roster"));
-  assert.ok(html.includes("02 Add / Drop"));
-  assert.ok(html.includes("03 Game Totals"));
-  assert.ok(html.includes("04 Point Scorers"));
-  assert.ok(html.includes("Adds Left: <strong>3/4</strong>"));
+  assert.ok(html.includes('data-tab="picks">Picks'));
+  assert.ok(html.includes('data-tab="scorers">Players'));
+  assert.ok(html.includes('data-tab="totals">Totals'));
+  assert.ok(html.includes('data-tab="roster">Roster'));
+  assert.ok(html.includes('data-tab="adddrop">Moves'));
+  assert.ok(html.includes("PuckLuck"));
   assert.ok(html.includes("LIVE · 5m Sync"));
-  assert.ok(html.includes('data-panel="roster"'));
+  assert.ok(html.includes('data-panel="picks"'));
   assert.ok(html.includes('class="tab-panel active"'));
-  assert.ok(html.includes('data-tab="roster">01 Roster'));
 });
 
 test("switches between two Yahoo fantasy teams connecting roster, add/drop, and waiver targets", () => {
@@ -381,14 +404,14 @@ test("switches between two Yahoo fantasy teams connecting roster, add/drop, and 
   const htmlTeam0 = renderDashboard(twoTeamReport, { nowMs: NOW, teamIndex: 0 });
   assert.ok(htmlTeam0.includes("team-switch-btn active"));
   assert.ok(htmlTeam0.includes("PuckLuck Builders"));
-  assert.ok(htmlTeam0.includes("Adds Left: <strong>3/4</strong>"));
+  assert.ok(htmlTeam0.includes("Adds <strong>3/4</strong>"));
   assert.ok(htmlTeam0.includes("Builders Streamer"));
   assert.ok(htmlTeam0.includes("Builders Waiver Gem"));
   assert.ok(!htmlTeam0.includes("Sharks Waiver Target"));
 
   const htmlTeam1 = renderDashboard(twoTeamReport, { nowMs: NOW, teamIndex: 1 });
   assert.ok(htmlTeam1.includes("Ice Sharks"));
-  assert.ok(htmlTeam1.includes("Adds Left: <strong>2/5</strong>"));
+  assert.ok(htmlTeam1.includes("Adds <strong>2/5</strong>"));
   assert.ok(htmlTeam1.includes("RECOMMEND_ADD"));
   assert.ok(htmlTeam1.includes("Sharks Streamer"));
   assert.ok(htmlTeam1.includes("Sharks Waiver Target"));
@@ -412,15 +435,28 @@ test("handles postponed games, zero-shot appearances, and unconfirmed goalies", 
   const report = makeReport();
   const totalsHtml = renderGameTotalsTab(report.games);
   assert.ok(totalsHtml.includes("POSTPONED"));
-  const postponedCard = totalsHtml.split('<article class="game-card">')[1];
+  // Best-picks ordering: +EV card first, postponed card last.
+  const activeCard = totalsHtml.split('<article class="game-card')[1];
+  assert.ok(activeCard.includes("game-card-ev"));
+  assert.ok(!activeCard.includes("POSTPONED"));
+
+  const postponedCard = totalsHtml.split('<article class="game-card')[2];
   assert.ok(postponedCard.includes("POSTPONED"));
   assert.ok(!postponedCard.includes("+EV"), "postponed game leaked +EV tag");
+  assert.ok(
+    !postponedCard.includes("MODEL LEANS"),
+    "postponed game leaked model strip"
+  );
 
-  const activeCard = totalsHtml.split('<article class="game-card">')[2];
   assert.ok(activeCard.includes("+EV"));
   assert.ok(activeCard.includes("BEST PICK:"));
   assert.ok(activeCard.includes("CONFIRMED"));
   assert.ok(activeCard.includes("PROJECTED"));
+  assert.ok(activeCard.includes("MODEL"));
+  assert.ok(activeCard.includes("LINE"));
+  assert.ok(activeCard.includes("MODEL LEANS OVER"), "missing edge direction");
+  assert.ok(activeCard.includes("+0.2"), "missing signed model-line delta");
+  assert.ok(activeCard.includes("O 56%"), "missing P(Over) meter label");
 
   const rosterHtml = renderRosterTab(report.roster);
   assert.ok(!rosterHtml.includes("NaN"));
@@ -429,6 +465,14 @@ test("handles postponed games, zero-shot appearances, and unconfirmed goalies", 
   assert.ok(rosterHtml.includes(">0<"));
   assert.ok(rosterHtml.includes("0.0"));
   assert.ok(rosterHtml.includes("CONFIRMED"));
+
+  const seasonRoster = renderRosterTab(report.roster, {
+    season: "20262027",
+  });
+  assert.ok(
+    seasonRoster.includes("mugs/nhl/20262027/EDM/8478402.png"),
+    "roster rows missing player headshots"
+  );
 });
 
 test("ranks and filters free agents / waiver targets by 15-game EWMA process metrics", () => {
@@ -462,6 +506,7 @@ test("renders point scorers with Goal/Assist/Point probabilities and flags +EV p
   assert.ok(allHtml.includes("Assist: <b>65%</b>"));
   assert.ok(allHtml.includes("PROFIT EDGE:"));
   assert.ok(allHtml.includes("+24.5% EV"));
+  assert.ok(allHtml.includes("player-headshot"), "missing scorer headshots");
 
   // Default ALL/POINTS sort: McDavid (81%) > MacKinnon (75%) > Matthews (69%)
   const mcdIdx = allHtml.indexOf("Connor McDavid");
@@ -482,4 +527,42 @@ test("renders point scorers with Goal/Assist/Point probabilities and flags +EV p
   assert.ok(evHtml.includes("Connor McDavid"));
   assert.ok(evHtml.includes("Auston Matthews"));
   assert.ok(!evHtml.includes("Nathan MacKinnon"));
+});
+
+test("best picks board merges +EV totals and props ranked by edge, excluding postponed games", () => {
+  const report = makeReport();
+  const picksHtml = renderBestPicksTab(report.games, report.point_scorers, {
+    season: "20262027",
+  });
+
+  assert.ok(picksHtml.includes("tag-total"), "missing TOTAL pick tag");
+  assert.ok(picksHtml.includes("tag-prop"), "missing PROP pick tag");
+  assert.ok(picksHtml.includes("OVER 6.5"), "missing totals pick");
+  assert.ok(picksHtml.includes("Auston Matthews"));
+  assert.ok(picksHtml.includes("crest-pair"), "totals pick missing team crests");
+  assert.ok(
+    picksHtml.includes("mugs/nhl/20262027/EDM/8478402.png"),
+    "prop pick missing headshot"
+  );
+
+  // EV ranking: McDavid prop (+24.5%) > Matthews prop (+6.6%) > game total (+6.1%)
+  const mcdIdx = picksHtml.indexOf("1+ Point");
+  const mattIdx = picksHtml.indexOf("Anytime Goal");
+  const gameIdx = picksHtml.indexOf("OVER 6.5");
+  assert.ok(
+    mcdIdx !== -1 && mattIdx !== -1 && gameIdx !== -1,
+    "missing expected picks"
+  );
+  assert.ok(
+    mcdIdx < mattIdx && mattIdx < gameIdx,
+    "picks not ranked by EV descending"
+  );
+
+  // Postponed CAR @ TOR game never leaks onto the board.
+  assert.ok(!picksHtml.includes("CAR @ TOR"));
+
+  // Thin slate pads with muted model leans (MacKinnon is the only non-EV scorer).
+  assert.ok(picksHtml.includes("Model Leans"));
+  assert.ok(picksHtml.includes("tag-lean"));
+  assert.ok(picksHtml.includes("Nathan MacKinnon"));
 });
