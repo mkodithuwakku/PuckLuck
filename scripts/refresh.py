@@ -1005,20 +1005,23 @@ def _market_game_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     consensus = []
     for gid in sorted(by_game):
         group = by_game[gid]
-        lines = sorted(float(g[line_col]) for g in group)
+        real = [
+            g
+            for g in group
+            if sb_col
+            and str(g.get(sb_col) or "").lower() not in ("", "consensus", "baseline")
+        ]
+        pool = real or group
+        lines = sorted(float(g[line_col]) for g in pool)
         mid = lines[len(lines) // 2] if len(lines) % 2 else lines[len(lines) // 2 - 1]
-        books = [str(g.get(sb_col) or "") for g in group] if sb_col else []
-        book = next(
-            (b for b in books if b and b.lower() not in ("consensus", "baseline")),
-            books[0] if books else "",
-        )
+        books = {str(g.get(sb_col)) for g in real} if sb_col else set()
         consensus.append(
             {
                 "game_id": gid,
                 "line": mid,
-                "over_odds": max(int(g[over_col]) for g in group),
-                "under_odds": max(int(g[under_col]) for g in group),
-                "sportsbook": book or "consensus",
+                "over_odds": max(int(g[over_col]) for g in pool),
+                "under_odds": max(int(g[under_col]) for g in pool),
+                "sportsbook": f"{len(books)} books" if books else "consensus",
             }
         )
     return consensus
@@ -1050,6 +1053,45 @@ def _recent_pair_stream(
 ESPN_SCOREBOARD_URL = (
     "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"
 )
+ODDSGAP_LINESHOP_URL = "https://theoddsgap.com/api/lineshop"
+_ODDSGAP_MATCH_TOLERANCE_SECONDS = 3600
+_NHL_FULL_NAMES: Dict[str, str] = {
+    "Anaheim Ducks": "ANA",
+    "Boston Bruins": "BOS",
+    "Buffalo Sabres": "BUF",
+    "Calgary Flames": "CGY",
+    "Carolina Hurricanes": "CAR",
+    "Chicago Blackhawks": "CHI",
+    "Colorado Avalanche": "COL",
+    "Columbus Blue Jackets": "CBJ",
+    "Dallas Stars": "DAL",
+    "Detroit Red Wings": "DET",
+    "Edmonton Oilers": "EDM",
+    "Florida Panthers": "FLA",
+    "Los Angeles Kings": "LAK",
+    "Minnesota Wild": "MIN",
+    "Montreal Canadiens": "MTL",
+    "Montréal Canadiens": "MTL",
+    "Nashville Predators": "NSH",
+    "New Jersey Devils": "NJD",
+    "New York Islanders": "NYI",
+    "New York Rangers": "NYR",
+    "Ottawa Senators": "OTT",
+    "Philadelphia Flyers": "PHI",
+    "Pittsburgh Penguins": "PIT",
+    "San Jose Sharks": "SJS",
+    "Seattle Kraken": "SEA",
+    "St. Louis Blues": "STL",
+    "St Louis Blues": "STL",
+    "Tampa Bay Lightning": "TBL",
+    "Toronto Maple Leafs": "TOR",
+    "Utah Hockey Club": "UTA",
+    "Utah Mammoth": "UTA",
+    "Vancouver Canucks": "VAN",
+    "Vegas Golden Knights": "VGK",
+    "Washington Capitals": "WSH",
+    "Winnipeg Jets": "WPG",
+}
 _FINISHED_STATES: FrozenSet[str] = frozenset({"FINAL", "OFF"})
 _FANTASY_TEAM_PROFILES: Dict[str, Tuple[str, str, str]] = {
     "team1": ("McDavid's Oil", "MO", "High-Stakes H2H"),
@@ -1203,6 +1245,78 @@ def fetch_open_consensus_lines(
                     sportsbook="consensus",
                 )
             )
+    return lines
+
+
+def _parse_utc(value: Any) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fetch_oddsgap_total_lines(
+    scheduled_games: Sequence[ScheduledGame],
+    *,
+    http_fetcher: Callable[[str], Dict[str, Any]] = default_json_fetcher,
+) -> List[MarketTotalLine]:
+    """Per-book totals from theoddsgap.com's public lineshop feed (no key).
+
+    One request returns every scanned game across sports; each NHL game
+    carries ``totals_data.all_books`` keyed by book with ``total``,
+    ``over_juice`` and ``under_juice``. Games match the NHL schedule on
+    team names plus a one-hour commence-time tolerance.
+    """
+    try:
+        payload = http_fetcher(ODDSGAP_LINESHOP_URL)
+    except Exception:
+        return []
+    feed = [
+        g
+        for g in (payload or {}).get("games") or []
+        if str((g or {}).get("sport")) == "icehockey_nhl"
+    ]
+    if not feed:
+        return []
+    captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines: List[MarketTotalLine] = []
+    for game in scheduled_games:
+        start = _parse_utc(game.start_time_utc)
+        home_abbr = str(game.home_abbr).upper()
+        away_abbr = str(game.away_abbr).upper()
+        for entry in feed:
+            if _NHL_FULL_NAMES.get(str(entry.get("home") or "")) != home_abbr:
+                continue
+            if _NHL_FULL_NAMES.get(str(entry.get("away") or "")) != away_abbr:
+                continue
+            commence = _parse_utc(entry.get("commence_time"))
+            if start is not None and commence is not None:
+                if (
+                    abs((commence - start).total_seconds())
+                    > _ODDSGAP_MATCH_TOLERANCE_SECONDS
+                ):
+                    continue
+            all_books = (entry.get("totals_data") or {}).get("all_books") or {}
+            for book_key, offer in all_books.items():
+                if not isinstance(offer, dict):
+                    continue
+                try:
+                    total = float(offer["total"])
+                    over_juice = int(offer["over_juice"])
+                    under_juice = int(offer["under_juice"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                lines.append(
+                    _make_market_line(
+                        game.game_id,
+                        total,
+                        over_juice,
+                        under_juice,
+                        captured,
+                        sportsbook=str(offer.get("label") or book_key),
+                    )
+                )
+            break
     return lines
 
 
@@ -1516,12 +1630,16 @@ def sync_live_nhl_slate(
             except Exception:
                 continue
 
-    # Market lines are a per-slate snapshot: drop stale totals and prop rows
-    # so a previous slate never leaks into tonight's report.
-    conn.execute("DELETE FROM fact_market_lines")
-
+    # Market lines are keyed (game_id, sportsbook, market_type): each book's
+    # latest line is kept per game and prior slates stay for backtesting.
+    # Non-slate rows never reach the report — _build_game_items filters by
+    # slate_matchups.
     for line in fetch_open_consensus_lines(
         active, scheduled, http_fetcher=odds_fetcher or nhl_fetcher
+    ):
+        upsert_total_line(conn, line)
+    for line in fetch_oddsgap_total_lines(
+        scheduled, http_fetcher=odds_fetcher or nhl_fetcher
     ):
         upsert_total_line(conn, line)
 

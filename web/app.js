@@ -352,8 +352,9 @@ function propMarketLabel(market) {
 }
 
 /* True when a price is model-estimated rather than a real book line. */
+const ESTIMATED_PRICE_SOURCES = new Set(["", "consensus", "baseline", "demo", "puckluck demo"]);
 function isEstimatedPrice(source) {
-  return !source || /consensus|baseline|demo/i.test(String(source));
+  return ESTIMATED_PRICE_SOURCES.has(String(source || "").trim().toLowerCase());
 }
 
 function priceSourceNote(source) {
