@@ -1499,6 +1499,10 @@ def sync_live_nhl_slate(
             except Exception:
                 continue
 
+    # Market lines are a per-slate snapshot: drop stale totals and prop rows
+    # so a previous slate never leaks into tonight's report.
+    conn.execute("DELETE FROM fact_market_lines")
+
     for line in fetch_open_consensus_lines(
         active, scheduled, http_fetcher=odds_fetcher or nhl_fetcher
     ):
@@ -1521,6 +1525,7 @@ def run_warehouse_pipeline(
     generated_at: Optional[str] = None,
     active_slate_date: Optional[str] = None,
     slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
+    slate_start_times: Optional[Dict[int, str]] = None,
     model_params: Optional[TunedModelParams] = None,
     model_params_path: Union[str, Path] = DEFAULT_MODEL_PARAMS_PATH,
     model_health: Optional[Union[BacktestReport, Dict[str, Any]]] = None,
@@ -1677,6 +1682,7 @@ def run_warehouse_pipeline(
         as_of_date,
         abbrs,
         slate_matchups,
+        slate_start_times=slate_start_times,
         base_rate=params.poisson_base_rate,
     )
 
@@ -1790,6 +1796,7 @@ def _build_game_items(
     abbrs: Dict[int, str],
     slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
     *,
+    slate_start_times: Optional[Dict[int, str]] = None,
     base_rate: float = 3.05,
 ) -> Tuple[List[Dict[str, Any]], FrozenSet[int]]:
     """Build the games list; returns (items, team_ids on tonight's slate)."""
@@ -1807,6 +1814,8 @@ def _build_game_items(
     )
     for idx, market in enumerate(consensus):
         game_id = market["game_id"]
+        if slate_matchups is not None and game_id not in slate_matchups:
+            continue
         pairing = matchup_map.get(game_id)
         if pairing is None and fallback_pairs:
             pairing = fallback_pairs[idx % len(fallback_pairs)]
@@ -1848,7 +1857,8 @@ def _build_game_items(
         items.append(
             {
                 "game_id": game_id,
-                "start_time_utc": f"{as_of_date}T01:00:00Z",
+                "start_time_utc": (slate_start_times or {}).get(game_id)
+                or f"{as_of_date}T01:00:00Z",
                 "home_abbr": abbrs.get(home_id),
                 "away_abbr": abbrs.get(away_id),
                 "status": "Scheduled",
@@ -1928,9 +1938,11 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
             slate_matchups = {
                 g.game_id: (g.home_team_id, g.away_team_id) for g in scheduled
             }
+            slate_start_times = {g.game_id: g.start_time_utc for g in scheduled}
         else:
             active_date = args.date
             slate_matchups = None
+            slate_start_times = None
             if args.demo or _dim_players_empty(conn):
                 seed_demo_warehouse(conn, as_of_date=args.date)
         bt_report: Optional[BacktestReport] = None
@@ -1942,6 +1954,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
             as_of_date=active_date,
             active_slate_date=active_date,
             slate_matchups=slate_matchups,
+            slate_start_times=slate_start_times,
             model_params_path=args.params_path,
             model_health=bt_report,
         )
