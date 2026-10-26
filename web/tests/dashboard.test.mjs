@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   AUTO_REFRESH_INTERVAL_MS,
+  classifyPicks,
   TEAM_COLORS,
   isReportStale,
   renderAddDropTab,
@@ -223,6 +224,8 @@ function makeReport(overrides = {}) {
         market_goal_odds: 125,
         market_assist_odds: -145,
         market_point_odds: -185,
+        market_point_src: "Bovada",
+        point_ev: 0.245,
         fair_point_odds: -426,
         best_prop_market: "1+ Point",
         best_prop_odds: -185,
@@ -603,7 +606,7 @@ test("renders point scorers with Goal/Assist/Point probabilities and flags +EV p
   assert.ok(!evHtml.includes("Nathan MacKinnon"));
 });
 
-test("best picks board merges +EV totals and props ranked by edge, excluding postponed games", () => {
+test("main picks lead the board with real prices and exclude inactive players and model leans", () => {
   const report = makeReport();
   const picksHtml = renderBestPicksTab(report.games, report.point_scorers, {
     season: "20262027",
@@ -612,30 +615,29 @@ test("best picks board merges +EV totals and props ranked by edge, excluding pos
   assert.ok(picksHtml.includes("tag-total"), "missing TOTAL pick tag");
   assert.ok(picksHtml.includes("tag-prop"), "missing PROP pick tag");
   assert.ok(picksHtml.includes("OVER 6.5"), "missing totals pick");
-  assert.ok(picksHtml.includes("Auston Matthews"));
+  assert.ok(!picksHtml.includes("Auston Matthews"), "postponed player leaked onto picks");
   assert.ok(picksHtml.includes("crest-pair"), "totals pick missing team crests");
   assert.ok(
     picksHtml.includes("mugs/nhl/20262027/EDM/8478402.png"),
     "prop pick missing headshot"
   );
 
-  // Grouped sections: Player Props precede Game Totals; props rank by EV
-  // within their group (McDavid +24.5% > Matthews +6.6%).
+  // Main player props precede totals, followed by a separate longshot section.
   const totalsIdx = picksHtml.indexOf("Game Totals");
   const propsIdx = picksHtml.indexOf("Player Props");
   const mcdIdx = picksHtml.indexOf("1+ Point");
-  const mattIdx = picksHtml.indexOf("Anytime Goal");
   const gameIdx = picksHtml.indexOf("OVER 6.5");
   assert.ok(
     totalsIdx !== -1 && propsIdx !== -1 && propsIdx < totalsIdx,
     "missing/unsorted pick sections"
   );
   assert.ok(
-    mcdIdx !== -1 && mattIdx !== -1 && gameIdx !== -1,
+    mcdIdx !== -1 && gameIdx !== -1,
     "missing expected picks"
   );
-  assert.ok(mattIdx < gameIdx, "all player picks should precede totals");
-  assert.ok(mcdIdx < mattIdx, "props not ranked by EV within section");
+  assert.ok(mcdIdx < gameIdx, "all main player picks should precede totals");
+  assert.ok(gameIdx < picksHtml.indexOf('aria-label="Longshots"'));
+  assert.ok(picksHtml.includes("Estimated hit chance <strong>81%</strong>"));
 
   // Postponed, final, and live games never leak onto the board
   // (fixture marks them +EV — status must still exclude them).
@@ -643,8 +645,75 @@ test("best picks board merges +EV totals and props ranked by edge, excluding pos
   assert.ok(!picksHtml.includes("FLA @ CHI"), "finished game leaked onto picks");
   assert.ok(!picksHtml.includes("NYI @ DAL"), "live game leaked onto picks");
 
-  // Thin slate pads with muted model leans (MacKinnon is the only non-EV scorer).
-  assert.ok(picksHtml.includes("Model Leans"));
-  assert.ok(picksHtml.includes("tag-lean"));
-  assert.ok(picksHtml.includes("Nathan MacKinnon"));
+  assert.ok(!picksHtml.includes("Model Leans"));
+  assert.ok(!picksHtml.includes("tag-lean"));
+  assert.ok(!picksHtml.includes("Nathan MacKinnon"));
+  assert.ok(picksHtml.includes("calibration by market and probability range has not yet been validated"));
+});
+
+test("classifies each real market at the 50% boundary without hiding a main pick behind a longshot", () => {
+  const report = makeReport();
+  const player = {
+    ...report.point_scorers[0],
+    prob_point: 0.5, point_ev: 0.1, market_point_src: "Bovada", market_point_odds: 120,
+    prob_goal: 0.173, goal_ev: 0.6435, market_goal_src: "Bovada", market_goal_odds: 850,
+    prob_assist: 0.7, assist_ev: 1.1, market_assist_src: "baseline", market_assist_odds: 200,
+    best_prop_market: "GOALS", best_prop_ev: 0.6435,
+  };
+  const justBelow = {
+    ...player, player_id: 2, display_name: "Boundary Player",
+    prob_point: 0.4999, point_ev: 0.0998,
+    market_goal_src: "baseline", market_assist_src: "baseline",
+  };
+  const higherEv = {
+    ...player, player_id: 3, display_name: "Higher Main EV",
+    point_ev: 0.2, market_point_odds: 140, market_goal_src: "baseline",
+  };
+  const players = [player, justBelow, higherEv];
+  const { main, longshots } = classifyPicks(report.games, players);
+  assert.deepEqual(main.props.map((p) => p.player_id), [3, player.player_id]);
+  assert.equal(main.props[1].best_prop_market, "POINTS");
+  assert.equal(main.props[1].best_prop_odds, 120);
+  assert.deepEqual(longshots.props.map((p) => p.player_id), [player.player_id, 2]);
+  assert.equal(longshots.props[0].best_prop_market, "GOALS");
+  assert.equal(longshots.props[0].best_prop_odds, 850);
+  assert.equal(main.totals.length, 1);
+  const html = renderBestPicksTab(report.games, players);
+  const mainHtml = html.split('aria-label="Main picks"')[1].split('aria-label="Longshots"')[0];
+  assert.ok(mainHtml.includes("50%"));
+  assert.ok(!mainHtml.includes("+850"));
+  assert.ok(!mainHtml.includes("Boundary Player"));
+  assert.ok(html.includes("49.99%"));
+  const dashboard = renderDashboard({ ...report, point_scorers: players });
+  assert.ok(dashboard.includes('<b>3</b><span>MAIN PICKS</span>'));
+  assert.ok(dashboard.includes('<b>2</b><span>LONGSHOTS</span>'));
+  assert.ok(dashboard.includes('data-tab="picks">Picks<span class="nav-count">3</span>'));
+});
+
+test("both pick tiers reject missing provenance, invalid values, wrong matchups and started games", () => {
+  const report = makeReport();
+  const player = report.point_scorers[0];
+  for (const patch of [
+    { market_point_src: "baseline" }, { market_point_src: undefined },
+    { market_point_odds: 0 }, { market_point_odds: NaN },
+    { point_ev: 0.0349 }, { point_ev: NaN },
+    { prob_point: NaN }, { prob_point: undefined }, { prob_point: 1.1 },
+    { opponent_abbr: "VAN" }, { team_abbr: "VAN" },
+  ]) {
+    const groups = classifyPicks(report.games, [{ ...player, ...patch }]);
+    assert.equal(groups.main.props.length + groups.longshots.props.length, 0);
+  }
+  for (const status of ["Live", "Final", "POSTPONED", "Unknown"]) {
+    const groups = classifyPicks([{ ...report.games[0], status }], [player]);
+    assert.deepEqual(groups, { main: { props: [], totals: [] }, longshots: { props: [], totals: [] } });
+  }
+  const lowProbabilityTotal = {
+    ...report.games[0], prob_over: 0.4, over_odds: 200, ev: 0.2,
+  };
+  assert.equal(classifyPicks([lowProbabilityTotal], []).longshots.totals.length, 1);
+  assert.equal(classifyPicks([{ ...lowProbabilityTotal, line_source: "consensus" }], []).longshots.totals.length, 0);
+  const html = renderBestPicksTab([lowProbabilityTotal], []);
+  assert.ok(html.includes("No main picks meet the 50%"));
+  assert.ok(!html.includes("tag-lean"));
+  assert.ok(renderBestPicksTab([], []).includes("No qualifying longshots"));
 });
