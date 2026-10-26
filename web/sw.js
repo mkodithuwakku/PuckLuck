@@ -1,6 +1,6 @@
 /* PuckLuck service worker — offline shell + report caching (SRS §6.1.4). */
 
-const CACHE_NAME = "puckluck-shell-v8";
+const CACHE_NAME = "puckluck-shell-v9";
 const SHELL_ASSETS = [
   "./",
   "./index.html",

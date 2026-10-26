@@ -442,7 +442,14 @@ test("switches between two Yahoo fantasy teams connecting roster, add/drop, and 
   assert.equal(t0.team_summary.team_name, "PuckLuck Builders");
   assert.equal(t1.team_summary.team_name, "Ice Sharks");
 
-  const htmlTeam0 = renderDashboard(twoTeamReport, { nowMs: NOW, teamIndex: 0 });
+  for (const activeTab of ["picks", "scorers", "totals"]) {
+    const html = renderDashboard(twoTeamReport, { nowMs: NOW, activeTab });
+    const header = html.slice(html.indexOf("<header"), html.indexOf("</header>"));
+    assert.ok(!header.includes("team-switch-btn"));
+    assert.ok(!header.includes("PuckLuck Builders"));
+    assert.ok(!header.includes("Ice Sharks"));
+  }
+  const htmlTeam0 = renderDashboard(twoTeamReport, { nowMs: NOW, teamIndex: 0, activeTab: "roster" });
   assert.ok(htmlTeam0.includes("team-switch-btn active"));
   assert.ok(htmlTeam0.includes("PuckLuck Builders"));
   assert.ok(htmlTeam0.includes("Adds <strong>3/4</strong>"));
@@ -450,7 +457,9 @@ test("switches between two Yahoo fantasy teams connecting roster, add/drop, and 
   assert.ok(htmlTeam0.includes("Builders Waiver Gem"));
   assert.ok(!htmlTeam0.includes("Sharks Waiver Target"));
 
-  const htmlTeam1 = renderDashboard(twoTeamReport, { nowMs: NOW, teamIndex: 1 });
+  const htmlTeam1 = renderDashboard(twoTeamReport, { nowMs: NOW, teamIndex: 1, activeTab: "adddrop" });
+  assert.ok(htmlTeam1.includes("team-switch-btn active"));
+  assert.ok(htmlTeam1.includes('<article class="adddrop-card">'));
   assert.ok(htmlTeam1.includes("Ice Sharks"));
   assert.ok(htmlTeam1.includes("Adds <strong>2/5</strong>"));
   assert.ok(htmlTeam1.includes("RECOMMEND_ADD"));

@@ -253,7 +253,7 @@ export function resolveActiveTeam(report, teamIndex = 0) {
 
 export function renderHeader(
   report,
-  { nowMs = Date.now(), teamIndex = 0 } = {}
+  { nowMs = Date.now(), teamIndex = 0, activeTab = "picks" } = {}
 ) {
   const slateDate = esc(report?.active_slate_date || "");
 
@@ -267,7 +267,7 @@ export function renderHeader(
       ? Math.max(0, Math.min(Number(teamIndex) || 0, teams.length - 1))
       : 0;
   const switcherHtml =
-    teams.length > 1
+    teams.length > 1 && ["roster", "adddrop"].includes(activeTab)
       ? `<div class="team-switcher" role="tablist" aria-label="Fantasy Teams">${teams
           .map((t, i) => {
             const ts = t?.team_summary || {};
@@ -719,7 +719,7 @@ export function renderAddDropTab(
       : action === "HOLD_ASSET" || action === "HOLD"
         ? badge("HOLD")
         : badge(action || "HOLD");
-  const staleAttrs = stale ? ` stale-disabled" data-stale="true"` : "";
+  const staleAttrs = stale ? ` data-stale="true"` : "";
   const staleNotice = stale
     ? `<div class="stale-banner">STALE DATA — recommendations frozen</div>`
     : "";
@@ -737,7 +737,7 @@ export function renderAddDropTab(
   return `<section class="tab-panel" data-panel="adddrop">
   ${context}
   <div class="section-title">Streaming Solver</div>
-  <article class="adddrop-card${staleAttrs}>
+  <article class="adddrop-card${stale ? " stale-disabled" : ""}"${staleAttrs}>
     ${staleNotice}
     <div class="adddrop-head">
       <div class="adddrop-pair">
@@ -1205,7 +1205,7 @@ export function renderDashboard(
   ).join("");
 
   return `<div class="pl-dashboard">
-${renderHeader(report, { nowMs, teamIndex })}
+${renderHeader(report, { nowMs, teamIndex, activeTab })}
 <main class="pl-main">${panelHtml}</main>
 <footer class="pl-foot">Bivariate-Poisson model · Lines via The Odds Gap + Bovada · Data: NHL Stats</footer>
 <nav class="bottom-nav">${nav}</nav>
