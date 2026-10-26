@@ -1272,6 +1272,12 @@ main.pl-main {
   box-shadow: 0 0 14px rgba(47, 191, 113, 0.12);
   border-left-color: var(--emerald);
 }
+.scorer-row-closed {
+  opacity: 0.55;
+}
+.scorer-row-closed .prob-pill {
+  filter: saturate(0.6);
+}
 .scorer-top {
   display: flex;
   justify-content: space-between;

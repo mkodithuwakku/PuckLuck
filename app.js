@@ -59,7 +59,7 @@ const TAB_DEFS = [
   ["adddrop", "Moves"],
 ];
 
-const SCORER_FILTERS = ["ALL", "POINTS", "GOALS", "ASSISTS", "+EV"];
+const SCORER_FILTERS = ["ALL", "BOOK", "POINTS", "GOALS", "ASSISTS", "+EV"];
 
 const ESCAPES = {
   "&": "&amp;",
@@ -968,16 +968,38 @@ export function renderGameTotalsTab(games = []) {
 
 export function renderPointScorersTab(
   pointScorers = [],
-  { query = "", filter = "ALL", season = "" } = {}
+  { query = "", filter = "ALL", season = "", games = [] } = {}
 ) {
   const q = String(query || "").toLowerCase().trim();
   const activeFilter = SCORER_FILTERS.includes(String(filter).toUpperCase())
     ? String(filter).toUpperCase()
     : "ALL";
 
+  // Each team appears at most once per slate, so a team → status map is enough.
+  const statusByTeam = new Map();
+  for (const g of games) {
+    const s = String(g.status || "SCHEDULED").toUpperCase();
+    if (g.home_abbr) statusByTeam.set(g.home_abbr, s);
+    if (g.away_abbr) statusByTeam.set(g.away_abbr, s);
+  }
+  const gameStatus = (p) =>
+    statusByTeam.get(String(p.team_abbr || "")) || "SCHEDULED";
+  const anyBookPrice = (p) =>
+    ["market_point_src", "market_goal_src", "market_assist_src", "odds_source"].some(
+      (k) => !isEstimatedPrice(p[k])
+    );
+  // Upcoming games first, then live, then finished — mirroring the Totals tiering.
+  const tierOf = (p) => {
+    const s = gameStatus(p);
+    if (s === "SCHEDULED" || s === "PRE") return 0;
+    if (s === "LIVE") return 1;
+    return 2;
+  };
+
   const filtered = [...pointScorers]
     .filter((p) => {
       if (activeFilter === "+EV" && p.is_positive_ev !== true) return false;
+      if (activeFilter === "BOOK" && !anyBookPrice(p)) return false;
       if (!q) return true;
       return (
         String(p.display_name || "")
@@ -995,6 +1017,8 @@ export function renderPointScorersTab(
       );
     })
     .sort((a, b) => {
+      const tier = tierOf(a) - tierOf(b);
+      if (tier !== 0) return tier;
       if (activeFilter === "GOALS") {
         return (
           Number(b.prob_goal || 0) - Number(a.prob_goal || 0) ||
@@ -1014,6 +1038,7 @@ export function renderPointScorersTab(
         );
       }
       return (
+        Number(anyBookPrice(b)) - Number(anyBookPrice(a)) ||
         Number(b.prob_point || 0) - Number(a.prob_point || 0) ||
         Number(b.best_prop_ev || 0) - Number(a.best_prop_ev || 0)
       );
@@ -1046,6 +1071,9 @@ export function renderPointScorersTab(
 
       const realBook = !isEstimatedPrice(p.odds_source);
       const evBadge = p.is_positive_ev === true ? badge("+EV") : "";
+      const gStatus = gameStatus(p);
+      const closed = gStatus !== "SCHEDULED" && gStatus !== "PRE";
+      const closedBadge = closed ? badge(gStatus) : "";
       const profitBanner =
         p.is_positive_ev === true
           ? `<div class="scorer-ev-banner">PROFIT EDGE: <strong>${esc(
@@ -1075,12 +1103,12 @@ export function renderPointScorersTab(
 
       return `<div class="scorer-row${
         p.is_positive_ev === true ? " scorer-row-ev" : ""
-      }" style="--team-color:${primary}">
+      }${closed ? " scorer-row-closed" : ""}" style="--team-color:${primary}">
   <div class="scorer-top">
     <div class="player-head">
       ${renderPlayerHeadshot(p, season)}
       <div class="player-title-wrap">
-        <div class="player-name">${esc(p.display_name)}${evBadge}</div>
+        <div class="player-name">${esc(p.display_name)}${evBadge}${closedBadge}</div>
         <div class="player-sub">${esc(p.position || "F")} · ${esc(
           p.team_abbr || ""
         )}${p.opponent_abbr ? ` vs ${esc(p.opponent_abbr)}` : ""} · SOG <b>${fmt1(
@@ -1105,7 +1133,9 @@ export function renderPointScorersTab(
     .join("");
 
   return `<section class="tab-panel" data-panel="scorers">
-  <div class="section-title">Point Scorers &amp; Prop Edges</div>
+  <div class="section-title">Point Scorers &amp; Prop Edges<span class="st-meta">${esc(
+    `${pointScorers.filter(anyBookPrice).length} book-priced · upcoming games first`
+  )}</span></div>
   ${filterBar}
   ${rows || `<div class="player-sub">No point scorers match current filter.</div>`}
 </section>`;
@@ -1141,6 +1171,7 @@ export function renderDashboard(
       query: scorerQuery,
       filter: scorerFilter,
       season,
+      games: report?.games || [],
     }),
     renderGameTotalsTab(report?.games || []),
     renderRosterTab(activeTeam.roster, { season, team: activeTeam }),
