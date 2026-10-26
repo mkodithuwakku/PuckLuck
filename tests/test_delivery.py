@@ -544,8 +544,19 @@ def test_prop_pick_gate_requires_real_book_price() -> None:
             "goal": 120,
         },
     )
-    assert mixed["best_prop_market"] == "POINTS"
+    assert mixed["best_prop_market"] == "GOALS"
     assert mixed["is_positive_ev"] is False
+    mixed_positive = refresh.compute_point_scorer_projection(
+        **shared,
+        market_odds={
+            "point_src": "baseline",
+            "point": 1000,
+            "goal_src": "Bovada",
+            "goal": 300,
+        },
+    )
+    assert mixed_positive["best_prop_market"] == "GOALS"
+    assert mixed_positive["is_positive_ev"] is True
 
 
 def test_sync_live_nhl_slate_projects_tonights_real_matchups(
@@ -580,6 +591,8 @@ def test_sync_live_nhl_slate_projects_tonights_real_matchups(
         slate_matchups = {
             g.game_id: (g.home_team_id, g.away_team_id) for g in scheduled
         }
+        # Old opponents must not leak into either features or today's labels.
+        conn.execute("UPDATE fact_skater_games SET opponent_id = team_id")
         report = refresh.run_warehouse_pipeline(
             conn,
             as_of_date=active,
@@ -595,6 +608,10 @@ def test_sync_live_nhl_slate_projects_tonights_real_matchups(
     assert len(report["games"]) >= 1
     assert all(g["line"] > 0 and g["expected_total"] > 0 for g in report["games"])
     assert len(report["point_scorers"]) >= 4
+    opponents = {"EDM": "COL", "COL": "EDM"}
+    assert all(
+        p["opponent_abbr"] == opponents[p["team_abbr"]] for p in report["point_scorers"]
+    )
     # Consensus line from ESPN flowed into the market item.
     game = next(g for g in report["games"] if g["game_id"] == 9002)
     assert game["line"] == 6.5

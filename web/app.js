@@ -525,8 +525,8 @@ export function renderBestPicksTab(
       : "";
 
   let rows =
-    section("Game Totals", totalPlays.length, totalPlays, 0) +
-    section("Player Props", propPlays.length, propPlays, totalPlays.length);
+    section("Player Props", propPlays.length, propPlays, 0) +
+    section("Game Totals", totalPlays.length, totalPlays, propPlays.length);
 
   if (playCount < 5) {
     const leans = [

@@ -1602,12 +1602,6 @@ def compute_point_scorer_projection(
     assist_ev = round(
         compute_ev(prob_assist, american_to_decimal(market_assist_odds)), 4
     )
-    best_market, best_odds, best_ev = max(
-        ("POINTS", market_point_odds, point_ev),
-        ("GOALS", market_goal_odds, goal_ev),
-        ("ASSISTS", market_assist_odds, assist_ev),
-        key=lambda c: c[2],
-    )
     # Per-market provenance: each price is real only when its own market row
     # came from a book; a Bovada goalscorer price must not launder baseline
     # points/assists prices into looking real.
@@ -1616,6 +1610,21 @@ def compute_point_scorer_projection(
         "goal": str(stored.get("goal_src") or "baseline"),
         "assist": str(stored.get("assist_src") or "baseline"),
     }
+    candidates = [
+        ("POINTS", market_point_odds, point_ev),
+        ("GOALS", market_goal_odds, goal_ev),
+        ("ASSISTS", market_assist_odds, assist_ev),
+    ]
+    market_keys = {"POINTS": "point", "GOALS": "goal", "ASSISTS": "assist"}
+    real_candidates = [
+        candidate
+        for candidate in candidates
+        if srcs[market_keys[candidate[0]]].lower()
+        not in ("", "baseline", "consensus", "demo")
+    ]
+    best_market, best_odds, best_ev = max(
+        real_candidates or candidates, key=lambda candidate: candidate[2]
+    )
     best_key = {"POINTS": "point", "GOALS": "goal", "ASSISTS": "assist"}[best_market]
     source = srcs[best_key]
     source_real = source.lower() not in ("", "baseline", "consensus", "demo")
@@ -1972,6 +1981,11 @@ def run_warehouse_pipeline(
     abbrs = _team_abbrs(conn)
     latest_skater = _latest_by_player(conn, "fact_skater_games", as_of_date)
     latest_goalie = _latest_by_player(conn, "fact_goalie_games", as_of_date)
+    # Historical rows supply team identity, never tonight's opponent.
+    slate_by_team = {}
+    for gid, (home_id, away_id) in (slate_matchups or {}).items():
+        slate_by_team[home_id] = (gid, away_id, True)
+        slate_by_team[away_id] = (gid, home_id, False)
 
     fa_items: List[Dict[str, Any]] = []
     fa_candidates: List[CandidatePlayer] = []
@@ -2015,12 +2029,15 @@ def run_warehouse_pipeline(
         if player_id not in latest_skater:
             continue
         team_id, opponent_id = latest_skater[player_id]
+        is_home = True
+        if team_id in slate_by_team:
+            _, opponent_id, is_home = slate_by_team[team_id]
         fv = fb.build_player_features(
             player_id,
             team_id,
             opponent_id,
             as_of_date,
-            is_home=True,
+            is_home=is_home,
             opponent_goalie_id=_team_goalie(conn, opponent_id, as_of_date),
             team_rest=2,
             opp_rest=2,
@@ -2179,7 +2196,11 @@ def run_warehouse_pipeline(
     scorer_records = [
         r
         for r in skater_records
-        if not slate_team_ids or r["team_id"] in slate_team_ids
+        if (
+            r["team_id"] in slate_by_team
+            if slate_matchups is not None
+            else not slate_team_ids or r["team_id"] in slate_team_ids
+        )
     ]
     ended_team_ids = set()
     if slate_states and slate_matchups:
@@ -2200,7 +2221,11 @@ def run_warehouse_pipeline(
             market_odds=_player_prop_odds(
                 conn,
                 r["player_id"],
-                set(slate_matchups) if slate_matchups is not None else None,
+                (
+                    frozenset({slate_by_team[r["team_id"]][0]})
+                    if slate_matchups is not None
+                    else None
+                ),
             ),
         )
         # A prop is only bettable before the player's game starts.
