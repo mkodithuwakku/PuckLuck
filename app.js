@@ -319,13 +319,12 @@ function renderKpiStrip(report, updatedLabel = "") {
   const scheduled = games.filter((g) => statusOf(g) === "SCHEDULED").length;
   const live = games.filter((g) => statusOf(g) === "LIVE").length;
   const finals = games.filter((g) => statusOf(g) === "FINAL").length;
-  const evPlays =
-    games.filter((g) => g.is_positive_ev === true).length +
-    scorers.filter((p) => p.is_positive_ev === true).length;
+  const { main, longshots } = classifyPicks(games, scorers);
   const priced = scorers.filter((p) => !isEstimatedPrice(p.odds_source)).length;
   const cells = [
     { label: "SCHEDULED", value: scheduled, cls: "" },
-    { label: "+EV PLAYS", value: evPlays, cls: "kpi-good" },
+    { label: "MAIN PICKS", value: main.props.length + main.totals.length, cls: "kpi-good" },
+    { label: "LONGSHOTS", value: longshots.props.length + longshots.totals.length, cls: "" },
     { label: "LIVE", value: live, cls: "kpi-live" },
     { label: "FINAL", value: finals, cls: "kpi-done" },
     { label: "BOOK-PRICED", value: priced, cls: "kpi-book" },
@@ -387,11 +386,10 @@ function totalPick(g) {
     <div class="pick-title"><span class="pick-tag tag-total">TOTAL</span>${esc(
       side
     )} ${fmt1(g.line)} <span class="pick-odds">${fmtOdds(odds)}</span></div>
+    <div class="pick-chance">Estimated hit chance <strong>${fmtHitChance(prob)}</strong></div>
     <div class="pick-sub">${esc(g.away_abbr)} @ ${esc(
       g.home_abbr
-    )} · Model ${fmt1(g.expected_total)} vs Line ${fmt1(g.line)} · ${Math.round(
-      prob * 100
-    )}%${priceSourceNote(g.line_source)}</div>
+    )} · Model ${fmt1(g.expected_total)} vs Line ${fmt1(g.line)}${priceSourceNote(g.line_source)}</div>
   </div>
   <div class="pick-edge ${evTier(g.ev)}"><b>${fmtSignedPct(g.ev)}</b><small>EV</small></div>
 </div>`,
@@ -421,6 +419,80 @@ function priceSourceNote(source) {
     : ` · ${esc(source)}`;
 }
 
+const MAIN_PICK_MIN_PROBABILITY = 0.5;
+const MIN_PICK_EV = 0.035;
+const PROP_MARKETS = [
+  ["point", "POINTS"],
+  ["goal", "GOALS"],
+  ["assist", "ASSISTS"],
+];
+
+function fmtHitChance(probability) {
+  return `${Math.round(probability * 10000) / 100}%`;
+}
+
+function validPickPrice(odds) {
+  return typeof odds === "number" && Number.isFinite(odds) && Math.abs(odds) >= 100;
+}
+
+function validPickProbability(probability) {
+  return typeof probability === "number" &&
+    Number.isFinite(probability) && probability > 0 && probability < 1;
+}
+
+// Keep one best real market per player in each probability tier. A lucrative
+// goals longshot must not hide that player's qualifying points/assists market.
+export function classifyPicks(games = [], pointScorers = []) {
+  const main = { props: [], totals: [] };
+  const longshots = { props: [], totals: [] };
+  const scheduled = games.filter((g) => String(g.status).toUpperCase() === "SCHEDULED");
+  const opponents = new Map();
+  for (const g of scheduled) {
+    opponents.set(g.home_abbr, g.away_abbr);
+    opponents.set(g.away_abbr, g.home_abbr);
+    const under = String(g.best_side).toUpperCase() === "UNDER";
+    const probability = under ? g.prob_under : g.prob_over;
+    const odds = under ? g.under_odds : g.over_odds;
+    if (
+      g.is_positive_ev !== true || !Number.isFinite(g.ev) || g.ev < MIN_PICK_EV ||
+      isEstimatedPrice(g.line_source) || !validPickPrice(odds) ||
+      !validPickProbability(probability)
+    ) continue;
+    const tier = probability >= MAIN_PICK_MIN_PROBABILITY ? main : longshots;
+    tier.totals.push(g);
+  }
+  for (const p of pointScorers) {
+    if (!opponents.has(p.team_abbr) || opponents.get(p.team_abbr) !== p.opponent_abbr) continue;
+    const candidates = PROP_MARKETS.flatMap(([key, market]) => {
+      const probability = p[`prob_${key}`];
+      const odds = p[`market_${key}_odds`];
+      const source = p[`market_${key}_src`];
+      const ev = p[`${key}_ev`];
+      if (
+        isEstimatedPrice(source) || !validPickPrice(odds) ||
+        !validPickProbability(probability) || !Number.isFinite(ev) || ev < MIN_PICK_EV
+      ) return [];
+      return [{
+        ...p,
+        best_prop_market: market,
+        best_prop_odds: odds,
+        best_prop_ev: ev,
+        odds_source: source,
+        pick_probability: probability,
+      }];
+    }).sort((a, b) => b.best_prop_ev - a.best_prop_ev || b.pick_probability - a.pick_probability);
+    const mainPick = candidates.find((p) => p.pick_probability >= MAIN_PICK_MIN_PROBABILITY);
+    const longshot = candidates.find((p) => p.pick_probability < MAIN_PICK_MIN_PROBABILITY);
+    if (mainPick) main.props.push(mainPick);
+    if (longshot) longshots.props.push(longshot);
+  }
+  for (const tier of [main, longshots]) {
+    tier.props.sort((a, b) => b.best_prop_ev - a.best_prop_ev || b.pick_probability - a.pick_probability);
+    tier.totals.sort((a, b) => b.ev - a.ev);
+  }
+  return { main, longshots };
+}
+
 function propPick(p, season) {
   const rawMarket = String(p.best_prop_market || "POINTS");
   const market = propMarketLabel(rawMarket);
@@ -445,9 +517,10 @@ function propPick(p, season) {
     <div class="pick-title"><span class="pick-tag tag-prop">PROP</span>${esc(
       market
     )} <span class="pick-odds">${fmtOdds(p.best_prop_odds)}</span></div>
+    <div class="pick-chance">Estimated hit chance <strong>${fmtHitChance(prob)}</strong></div>
     <div class="pick-sub">${esc(p.display_name)} · ${esc(
       p.team_abbr || ""
-    )}${opp} · Prob ${Math.round(prob * 100)}%${
+    )}${opp}${
       fair !== undefined ? ` · Fair ${fmtOdds(fair)}` : ""
     }${priceSourceNote(p.odds_source)}</div>
   </div>
@@ -458,69 +531,14 @@ function propPick(p, season) {
   };
 }
 
-function gameLean(g) {
-  const delta = Number(g.expected_total || 0) - Number(g.line || 0);
-  const lean = delta >= 0 ? "OVER" : "UNDER";
-  const [primary] = getTeamColors(g.home_abbr);
-  return {
-    ev: Math.abs(delta),
-    html: `<div class="pick-row pick-lean" style="--team-color:${primary}">
-  <span class="crest-pair">${renderTeamLogo(g.away_abbr)}${renderTeamLogo(
-      g.home_abbr
-    )}</span>
-  <div class="pick-main">
-    <div class="pick-title"><span class="pick-tag tag-lean">LEAN</span>${lean} ${fmt1(
-      g.line
-    )}</div>
-    <div class="pick-sub">${esc(g.away_abbr)} @ ${esc(
-      g.home_abbr
-    )} · Model ${fmt1(g.expected_total)} (${fmtSigned1(delta)})${priceSourceNote(
-      g.line_source
-    )}</div>
-  </div>
-  <div class="pick-edge edge-cool"><b>${fmtSigned1(delta)}</b><small>edge</small></div>
-</div>`,
-  };
-}
-
-function scorerLean(p, season) {
-  const prob = Number(p.prob_point || 0);
-  const [primary] = getTeamColors(p.team_abbr);
-  const opp = p.opponent_abbr ? ` vs ${esc(p.opponent_abbr)}` : "";
-  return {
-    ev: prob,
-    html: `<div class="pick-row pick-lean" style="--team-color:${primary}">
-  ${renderPlayerHeadshot(p, season)}
-  <div class="pick-main">
-    <div class="pick-title"><span class="pick-tag tag-lean">LEAN</span>${esc(
-      p.display_name
-    )} 1+ Pt</div>
-    <div class="pick-sub">${esc(p.team_abbr || "")}${opp} · Prob ${Math.round(
-      prob * 100
-    )}%</div>
-  </div>
-  <div class="pick-edge edge-cool"><b>${Math.round(
-    prob * 100
-  )}%</b><small>prob</small></div>
-</div>`,
-  };
-}
-
 export function renderBestPicksTab(
   games = [],
   pointScorers = [],
   { season = "" } = {}
 ) {
-  const activeGames = (games || []).filter((g) => !isEnded(g));
-  const totalPlays = activeGames
-    .filter((g) => g.is_positive_ev === true)
-    .map(totalPick)
-    .sort((a, b) => b.ev - a.ev || b.sortProb - a.sortProb);
-  const propPlays = (pointScorers || [])
-    .filter((p) => p.is_positive_ev === true)
-    .map((p) => propPick(p, season))
-    .sort((a, b) => b.ev - a.ev || b.sortProb - a.sortProb);
-  const playCount = totalPlays.length + propPlays.length;
+  const { main, longshots } = classifyPicks(games, pointScorers);
+  const mainCount = main.props.length + main.totals.length;
+  const longshotCount = longshots.props.length + longshots.totals.length;
 
   const section = (title, count, picks, offset) =>
     picks.length
@@ -534,38 +552,27 @@ export function renderBestPicksTab(
           .join("")}`
       : "";
 
-  let rows =
-    section("Player Props", propPlays.length, propPlays, 0) +
-    section("Game Totals", totalPlays.length, totalPlays, propPlays.length);
-
-  if (playCount < 5) {
-    const leans = [
-      ...activeGames
-        .filter((g) => g.is_positive_ev !== true)
-        .map(gameLean),
-      ...(pointScorers || [])
-        .filter((p) => p.is_positive_ev !== true)
-        .map((p) => scorerLean(p, season)),
-    ]
-      .sort((a, b) => b.ev - a.ev)
-      .slice(0, Math.max(0, 8 - playCount));
-    if (leans.length) {
-      rows += `<div class="section-title picks-subhead">Model Leans<span class="st-meta">no bet</span></div>${leans
-        .map((l) => `<div class="pick-wrap">${l.html}</div>`)
-        .join("")}`;
-    }
-  }
+  const tierRows = (tier) =>
+    section("Player Props", tier.props.length, tier.props.map((p) => propPick(p, season)), 0) +
+    section("Game Totals", tier.totals.length, tier.totals.map(totalPick), tier.props.length);
 
   return `<section class="tab-panel" data-panel="picks">
   <div class="board-heading">
-    <div><span class="board-eyebrow">ON THE ICE. ON THE NUMBERS.</span><h1>Today's top plays<span>.</span></h1><p>Player props first. Real book prices. Model-driven edges.</p></div>
+    <div><span class="board-eyebrow">ON THE ICE. ON THE NUMBERS.</span><h1>Today's top plays<span>.</span></h1><p>50%+ estimated hit chance first. Longshots kept separate.</p></div>
     <span class="board-stamp" aria-hidden="true">NHL<span>DAILY<br>BOARD</span></span>
   </div>
-  <div class="section-title">The picks board<span class="st-meta">${playCount} +EV plays</span></div>
-  ${
-    rows ||
-    `<div class="empty-state">No edges on tonight's slate — check back closer to puck drop.</div>`
-  }
+  <p class="pick-policy">Both sections require real book prices, at least +3.5% EV, and a scheduled game. Best qualifying market per player in each section; ranked by EV within player props and totals.</p>
+  <section class="pick-tier" aria-label="Main picks">
+    <h2 class="pick-tier-heading">Main picks<span>${mainCount} ${mainCount === 1 ? "pick" : "picks"} · estimated hit ≥50%</span></h2>
+    ${mainCount > 0 && main.props.length === 0 ? `<p class="pick-policy">No player props currently meet both the 50% hit-chance and +EV requirements. Qualifying game totals are shown below.</p>` : ""}
+    ${tierRows(main) || `<div class="empty-state">No main picks meet the 50% hit-chance and +EV requirements right now.</div>`}
+  </section>
+  <section class="pick-tier pick-tier-longshots" aria-label="Longshots">
+    <h2 class="pick-tier-heading">Longshots<span>${longshotCount} ${longshotCount === 1 ? "pick" : "picks"} · estimated hit &lt;50%</span></h2>
+    <p class="pick-policy">These have a greater estimated chance of losing than winning. A larger payout can produce high EV despite a low hit chance.</p>
+    ${tierRows(longshots) || `<div class="empty-state">No qualifying longshots right now.</div>`}
+  </section>
+  <p class="pick-model-note">Hit chances are model estimates, not confidence scores. Player-prop calibration by market and probability range has not yet been validated. Markets for the same player are related outcomes, not independent bets.</p>
 </section>`;
 }
 
@@ -1205,10 +1212,8 @@ export function renderDashboard(
       )
     )
     .join("");
-  const pickCount =
-    (report?.games || []).filter((g) => g.is_positive_ev === true).length +
-    (report?.point_scorers || []).filter((p) => p.is_positive_ev === true)
-      .length;
+  const { main } = classifyPicks(report?.games || [], report?.point_scorers || []);
+  const pickCount = main.props.length + main.totals.length;
   const nav = TAB_DEFS.map(
     ([key, label]) =>
       `<button class="nav-btn${key === activeTab ? " active" : ""}" data-tab="${key}">${label}${

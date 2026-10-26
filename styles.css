@@ -476,8 +476,8 @@ main.pl-main {
   display: none;
 }
 .kpi {
-  flex: 1 0 62px;
-  min-width: 62px;
+  flex: 1 0 76px;
+  min-width: 76px;
   background: linear-gradient(135deg, #18343c, #10252c);
   border: 1px solid var(--border-glass);
   border-radius: 9px;
@@ -876,6 +876,63 @@ main.pl-main {
   margin-top: 2px;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+.pick-chance {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.pick-chance strong {
+  color: var(--brand-lime);
+  font-size: 14px;
+  margin-left: 4px;
+}
+.pick-tier {
+  margin-top: 24px;
+}
+.pick-tier-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+}
+.pick-tier-heading > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.pick-policy,
+.pick-model-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.pick-tier-longshots {
+  border-top: 1px solid var(--line-subtle);
+  padding-top: 22px;
+}
+.pick-tier-longshots .pick-tier-heading,
+.pick-tier-longshots .pick-chance strong {
+  color: var(--gold-subtle);
+}
+.pick-tier-longshots .pick-rank {
+  background: var(--gold-subtle);
+}
+.pick-tier-longshots .pick-edge {
+  color: var(--gold-subtle);
+  background: rgba(201, 168, 106, 0.08);
+  border-color: rgba(201, 168, 106, 0.25);
+  box-shadow: none;
+}
+.pick-model-note {
+  border-top: 1px solid var(--line-subtle);
+  margin-top: 24px;
+  padding-top: 14px;
 }
 .pick-tag {
   font-size: 8.5px;
