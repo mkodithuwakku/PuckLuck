@@ -14,7 +14,7 @@ import json
 import math
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
     Any,
@@ -1156,10 +1156,26 @@ def resolve_active_slate(
     payload = nhl_fetcher(f"{NHL_API_BASE}/schedule/{request_date}")
     days = _week_days(payload, request_date)
 
+    # The request anchor is a UTC/local date, but an NHL slate outlives it:
+    # yesterday's games stay live hours past midnight. Merge the previous day
+    # so the slate flips only once its last game is actually finished.
+    try:
+        prev_day = (date.fromisoformat(request_date) - timedelta(days=1)).isoformat()
+    except ValueError:
+        prev_day = request_date
+    if prev_day != request_date:
+        try:
+            prev_payload = nhl_fetcher(f"{NHL_API_BASE}/schedule/{prev_day}")
+            for day, games in _week_days(prev_payload, prev_day).items():
+                days.setdefault(day, games)
+        except Exception:
+            pass
+    earliest = prev_day
+
     active: Optional[str] = None
     for day in sorted(days):
         if (
-            day >= request_date
+            day >= earliest
             and days[day]
             and any(not _game_finished(g) for g in days[day])
         ):
