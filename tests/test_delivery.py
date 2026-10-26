@@ -523,16 +523,29 @@ def test_prop_pick_gate_requires_real_book_price() -> None:
     )
     baseline = refresh.compute_point_scorer_projection(
         **shared,
-        market_odds={"source": "baseline", "point": 300},
+        market_odds={"point_src": "baseline", "point": 300},
     )
     assert baseline["best_prop_ev"] >= 0.035  # looks profitable on paper
     assert baseline["is_positive_ev"] is False  # but is not a real pick
     real = refresh.compute_point_scorer_projection(
         **shared,
-        market_odds={"source": "Bovada", "point": 300},
+        market_odds={"point_src": "Bovada", "point": 300},
     )
     assert real["is_positive_ev"] is True
     assert real["odds_source"] == "Bovada"
+    # A real price on one market must not launder a baseline-priced pick on
+    # another: provenance is checked on the *best* market specifically.
+    mixed = refresh.compute_point_scorer_projection(
+        **shared,
+        market_odds={
+            "point_src": "baseline",
+            "point": 300,
+            "goal_src": "Bovada",
+            "goal": 120,
+        },
+    )
+    assert mixed["best_prop_market"] == "POINTS"
+    assert mixed["is_positive_ev"] is False
 
 
 def test_sync_live_nhl_slate_projects_tonights_real_matchups(

@@ -198,6 +198,9 @@ POINT_SCORER_ALLOWLIST: FrozenSet[str] = frozenset(
         "market_point_odds",
         "market_goal_odds",
         "market_assist_odds",
+        "market_point_src",
+        "market_goal_src",
+        "market_assist_src",
         "point_ev",
         "goal_ev",
         "assist_ev",
@@ -1516,8 +1519,16 @@ def _baseline_prop_odds(position: str, projected_fp: float) -> Tuple[int, int, i
     return (-150 if elite else 130, 160 if elite else 260, -130 if elite else 170)
 
 
-def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int]:
-    """Stored consensus prop prices for one skater from fact_market_lines."""
+def _player_prop_odds(
+    conn: sqlite3.Connection,
+    player_id: int,
+    slate_game_ids: Optional[FrozenSet[int]] = None,
+) -> Dict[str, int]:
+    """Stored prop prices for one skater, per-market provenance.
+
+    Rows are scoped to ``slate_game_ids`` (plus ``game_id=0`` baselines) so a
+    stale price from an earlier slate can never mask itself as today's line.
+    """
     columns = _table_columns(conn, "fact_market_lines")
     market_col = _pick(columns, "market_type", "market")
     target_col = _pick(columns, "target_id")
@@ -1525,12 +1536,14 @@ def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int
     if not all((market_col, target_col, over_col)):
         return {}
     sb_col = _pick(columns, "sportsbook", "book")
+    gid_col = _pick(columns, "game_id")
     marks = ", ".join(f"'{m}'" for m in _PROP_MARKETS)
     select = f"{market_col} AS m, {over_col} AS o"
     if sb_col:
         select += f", {sb_col} AS sb"
+    gid_select = f", {gid_col} AS gid" if gid_col else ""
     rows = conn.execute(
-        f"SELECT {select} FROM fact_market_lines "
+        f"SELECT {select}{gid_select} FROM fact_market_lines "
         f"WHERE {target_col} = ? AND {market_col} IN ({marks})",
         (str(player_id),),
     ).fetchall()
@@ -1539,21 +1552,22 @@ def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int
         "PLAYER_GOALS": "goal",
         "PLAYER_ASSISTS": "assist",
     }
+    allowed = set(slate_game_ids or ()) | {0}
     out: Dict[str, Any] = {}
     real_keys: set = set()
     for row in rows:
+        gid = int(row[3]) if gid_col else 0
+        if slate_game_ids is not None and gid not in allowed:
+            continue
         sb = str(row[2] or "") if sb_col else ""
         is_real = sb.lower() not in ("", "baseline", "consensus")
-        if is_real:
-            out["source"] = sb
-        elif "source" not in out:
-            out["source"] = sb or "baseline"
         key = key_map.get(str(row[0]).upper())
         if key is None or (not is_real and key in real_keys):
             continue
         if is_real:
             real_keys.add(key)
         out[key] = _to_int(row[1], -110)
+        out[f"{key}_src"] = sb or "baseline"
     return out
 
 
@@ -1594,7 +1608,16 @@ def compute_point_scorer_projection(
         ("ASSISTS", market_assist_odds, assist_ev),
         key=lambda c: c[2],
     )
-    source = str((market_odds or {}).get("source") or "baseline")
+    # Per-market provenance: each price is real only when its own market row
+    # came from a book; a Bovada goalscorer price must not launder baseline
+    # points/assists prices into looking real.
+    srcs = {
+        "point": str(stored.get("point_src") or "baseline"),
+        "goal": str(stored.get("goal_src") or "baseline"),
+        "assist": str(stored.get("assist_src") or "baseline"),
+    }
+    best_key = {"POINTS": "point", "GOALS": "goal", "ASSISTS": "assist"}[best_market]
+    source = srcs[best_key]
     source_real = source.lower() not in ("", "baseline", "consensus", "demo")
     return {
         "player_id": player_id,
@@ -1617,6 +1640,9 @@ def compute_point_scorer_projection(
         "market_point_odds": market_point_odds,
         "market_goal_odds": market_goal_odds,
         "market_assist_odds": market_assist_odds,
+        "market_point_src": srcs["point"],
+        "market_goal_src": srcs["goal"],
+        "market_assist_src": srcs["assist"],
         "point_ev": point_ev,
         "goal_ev": goal_ev,
         "assist_ev": assist_ev,
@@ -2171,7 +2197,11 @@ def run_warehouse_pipeline(
             comps=r["comps"],
             feats=r["feats"],
             projected_fp=r["proj_fp"],
-            market_odds=_player_prop_odds(conn, r["player_id"]),
+            market_odds=_player_prop_odds(
+                conn,
+                r["player_id"],
+                set(slate_matchups) if slate_matchups is not None else None,
+            ),
         )
         # A prop is only bettable before the player's game starts.
         if r["team_id"] in ended_team_ids:

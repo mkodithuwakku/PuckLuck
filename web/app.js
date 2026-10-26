@@ -1045,7 +1045,6 @@ export function renderPointScorersTab(
           : Number(p.projected_goals || 0) + Number(p.projected_assists || 0);
 
       const realBook = !isEstimatedPrice(p.odds_source);
-      const estTag = realBook ? "" : " est";
       const evBadge = p.is_positive_ev === true ? badge("+EV") : "";
       const profitBanner =
         p.is_positive_ev === true
@@ -1060,12 +1059,14 @@ export function renderPointScorersTab(
             )}</span></div>`
           : "";
 
-      const pill = (label, prob, odds, extraClass = "") => `<div class="prob-pill ${probTier(
+      const pill = (label, prob, odds, src, extraClass = "") => `<div class="prob-pill ${probTier(
         prob
       )}">
       <div class="prob-pill-top"><span>${label} <b>${Math.round(
         prob * 100
-        )}%</b></span><span class="odds-tag">${fmtOdds(odds)}${estTag}</span></div>
+        )}%</b></span><span class="odds-tag">${fmtOdds(odds)}${
+        isEstimatedPrice(src) ? " est" : ""
+      }</span></div>
       <div class="prob-bar"><div class="prob-fill ${extraClass}" style="width:${Math.min(
         100,
         Math.round(prob * 100)
@@ -1094,9 +1095,9 @@ export function renderPointScorersTab(
     <div class="fp-col">${fmt2(projPts)}<small>exp Pts</small></div>
   </div>
   <div class="scorer-prob-grid">
-    ${pill("1+ Pt:", probPt, p.market_point_odds)}
-    ${pill("Goal:", probGoal, p.market_goal_odds, "prob-fill-goal")}
-    ${pill("Assist:", probAst, p.market_assist_odds, "prob-fill-assist")}
+    ${pill("1+ Pt:", probPt, p.market_point_odds, p.market_point_src)}
+    ${pill("Goal:", probGoal, p.market_goal_odds, p.market_goal_src, "prob-fill-goal")}
+    ${pill("Assist:", probAst, p.market_assist_odds, p.market_assist_src, "prob-fill-assist")}
   </div>
   ${profitBanner}
 </div>`;
