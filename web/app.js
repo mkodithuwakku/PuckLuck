@@ -283,6 +283,10 @@ export function renderHeader(
           .join("")}</div>`
       : "";
 
+  const generated = report?.generated_at
+    ? fmtGameTime(report.generated_at)
+    : "";
+  const kpi = renderKpiStrip(report, generated);
   return `<header class="pl-header">
   <div class="pl-header-top">
     <div class="pl-brand"><span class="pl-brand-mark">PL</span><span class="pl-brand-name">PuckLuck</span></div>
@@ -291,9 +295,43 @@ export function renderHeader(
       <button type="button" class="pill pill-live" id="sync-now-btn" title="Refresh report now"><span class="live-dot"></span>LIVE · 5m Sync</button>
     </div>
   </div>
+  ${kpi}
   ${switcherHtml}
   ${banner}
 </header>`;
+}
+
+/* KPI cards row — the "dashboard" glance: what's on, what's bettable. */
+function renderKpiStrip(report, updatedLabel = "") {
+  const games = report?.games || [];
+  const scorers = report?.point_scorers || [];
+  const statusOf = (g) => String(g.status || "").toUpperCase();
+  const scheduled = games.filter((g) => statusOf(g) === "SCHEDULED").length;
+  const live = games.filter((g) => statusOf(g) === "LIVE").length;
+  const finals = games.filter((g) => statusOf(g) === "FINAL").length;
+  const evPlays =
+    games.filter((g) => g.is_positive_ev === true).length +
+    scorers.filter((p) => p.is_positive_ev === true).length;
+  const priced = scorers.filter((p) => !isEstimatedPrice(p.odds_source)).length;
+  const cells = [
+    { label: "SCHEDULED", value: scheduled, cls: "" },
+    { label: "+EV PLAYS", value: evPlays, cls: "kpi-good" },
+    { label: "LIVE", value: live, cls: "kpi-live" },
+    { label: "FINAL", value: finals, cls: "kpi-done" },
+    { label: "BOOK-PRICED", value: priced, cls: "kpi-book" },
+  ];
+  return `<div class="kpi-strip">${cells
+    .map(
+      (k) =>
+        `<div class="kpi ${k.cls}"><b>${k.value}</b><span>${k.label}</span></div>`
+    )
+    .join("")}${
+    updatedLabel
+      ? `<span class="kpi-updated" title="Report generated at">UPD ${esc(
+          updatedLabel
+        )}</span>`
+      : ""
+  }</div>`;
 }
 
 /* Compact fantasy context strip shown inside the Roster / Moves panels so
@@ -464,21 +502,33 @@ export function renderBestPicksTab(
   { season = "" } = {}
 ) {
   const activeGames = (games || []).filter((g) => !isEnded(g));
-  const plays = [
-    ...activeGames.filter((g) => g.is_positive_ev === true).map(totalPick),
-    ...(pointScorers || [])
-      .filter((p) => p.is_positive_ev === true)
-      .map((p) => propPick(p, season)),
-  ].sort((a, b) => b.ev - a.ev || b.sortProb - a.sortProb);
+  const totalPlays = activeGames
+    .filter((g) => g.is_positive_ev === true)
+    .map(totalPick)
+    .sort((a, b) => b.ev - a.ev || b.sortProb - a.sortProb);
+  const propPlays = (pointScorers || [])
+    .filter((p) => p.is_positive_ev === true)
+    .map((p) => propPick(p, season))
+    .sort((a, b) => b.ev - a.ev || b.sortProb - a.sortProb);
+  const playCount = totalPlays.length + propPlays.length;
 
-  let rows = plays
-    .map(
-      (pick, i) =>
-        `<div class="pick-wrap"><span class="pick-rank">${i + 1}</span>${pick.html}</div>`
-    )
-    .join("");
+  const section = (title, count, picks, offset) =>
+    picks.length
+      ? `<div class="section-title picks-subhead picks-group"><span>${title}</span><span class="st-meta">${count}</span></div>${picks
+          .map(
+            (pick, i) =>
+              `<div class="pick-wrap"><span class="pick-rank">${
+                offset + i + 1
+              }</span>${pick.html}</div>`
+          )
+          .join("")}`
+      : "";
 
-  if (plays.length < 5) {
+  let rows =
+    section("Game Totals", totalPlays.length, totalPlays, 0) +
+    section("Player Props", propPlays.length, propPlays, totalPlays.length);
+
+  if (playCount < 5) {
     const leans = [
       ...activeGames
         .filter((g) => g.is_positive_ev !== true)
@@ -488,16 +538,16 @@ export function renderBestPicksTab(
         .map((p) => scorerLean(p, season)),
     ]
       .sort((a, b) => b.ev - a.ev)
-      .slice(0, Math.max(0, 8 - plays.length));
+      .slice(0, Math.max(0, 8 - playCount));
     if (leans.length) {
-      rows += `<div class="section-title picks-subhead">Model Leans</div>${leans
+      rows += `<div class="section-title picks-subhead">Model Leans<span class="st-meta">no bet</span></div>${leans
         .map((l) => `<div class="pick-wrap">${l.html}</div>`)
         .join("")}`;
     }
   }
 
   return `<section class="tab-panel" data-panel="picks">
-  <div class="section-title">Today's Top Plays</div>
+  <div class="section-title">Today's Top Plays<span class="st-meta">${playCount} +EV</span></div>
   ${
     rows ||
     `<div class="empty-state">No edges on tonight's slate — check back closer to puck drop.</div>`
@@ -893,8 +943,23 @@ export function renderGameTotalsTab(games = []) {
 </article>`;
     })
     .join("");
+  const statusOf = (g) => String(g.status || "").toUpperCase();
+  const counts = ["SCHEDULED", "LIVE", "FINAL", "POSTPONED"].map((s) => [
+    s,
+    games.filter((g) => statusOf(g) === s).length,
+  ]);
+  const pulse = counts.some(([, n]) => n > 0)
+    ? `<div class="pulse-strip">${counts
+        .filter(([, n]) => n > 0)
+        .map(
+          ([s, n]) =>
+            `<span class="pulse-chip pulse-${s.toLowerCase()}">${n} ${s}</span>`
+        )
+        .join("")}</div>`
+    : "";
   return `<section class="tab-panel" data-panel="totals">
-  <div class="section-title">Tonight's Slate</div>
+  <div class="section-title">Tonight's Slate<span class="st-meta">${games.length} games</span></div>
+  ${pulse}
   ${cards || `<div class="player-sub">No games scheduled.</div>`}
 </section>`;
 }
@@ -979,7 +1044,8 @@ export function renderPointScorersTab(
           ? p.projected_points
           : Number(p.projected_goals || 0) + Number(p.projected_assists || 0);
 
-      const estTag = isEstimatedPrice(p.odds_source) ? " est" : "";
+      const realBook = !isEstimatedPrice(p.odds_source);
+      const estTag = realBook ? "" : " est";
       const evBadge = p.is_positive_ev === true ? badge("+EV") : "";
       const profitBanner =
         p.is_positive_ev === true
@@ -989,7 +1055,9 @@ export function renderPointScorersTab(
               p.best_prop_ev
             )} EV · Fair ${fmtOdds(
               p.fair_point_odds || p.fair_goal_odds
-            )}${estTag ? " · est. price" : ""})</div>`
+            )})<span class="src-note">${esc(
+              String(p.odds_source || "")
+            )}</span></div>`
           : "";
 
       const pill = (label, prob, odds, extraClass = "") => `<div class="prob-pill ${probTier(
@@ -1016,7 +1084,11 @@ export function renderPointScorersTab(
           p.team_abbr || ""
         )}${p.opponent_abbr ? ` vs ${esc(p.opponent_abbr)}` : ""} · SOG <b>${fmt1(
           p.projected_sog ?? p.shots_on_goal
-        )}</b> · iXG/60 <b>${fmt2(p.ixg_per60_ewma)}</b></div>
+        )}</b> · iXG/60 <b>${fmt2(p.ixg_per60_ewma)}</b>${
+          realBook
+            ? ` · <span class="src-note">${esc(String(p.odds_source))}</span>`
+            : ""
+        }</div>
       </div>
     </div>
     <div class="fp-col">${fmt2(projPts)}<small>exp Pts</small></div>
@@ -1087,14 +1159,23 @@ export function renderDashboard(
       )
     )
     .join("");
+  const pickCount =
+    (report?.games || []).filter((g) => g.is_positive_ev === true).length +
+    (report?.point_scorers || []).filter((p) => p.is_positive_ev === true)
+      .length;
   const nav = TAB_DEFS.map(
     ([key, label]) =>
-      `<button class="nav-btn${key === activeTab ? " active" : ""}" data-tab="${key}">${label}</button>`
+      `<button class="nav-btn${key === activeTab ? " active" : ""}" data-tab="${key}">${label}${
+        key === "picks" && pickCount
+          ? `<span class="nav-count">${pickCount}</span>`
+          : ""
+      }</button>`
   ).join("");
 
   return `<div class="pl-dashboard">
 ${renderHeader(report, { nowMs, teamIndex })}
 <main class="pl-main">${panelHtml}</main>
+<footer class="pl-foot">Bivariate-Poisson model · Lines via The Odds Gap + Bovada · Data: NHL Stats</footer>
 <nav class="bottom-nav">${nav}</nav>
 </div>`;
 }

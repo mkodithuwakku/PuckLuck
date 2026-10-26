@@ -1594,6 +1594,8 @@ def compute_point_scorer_projection(
         ("ASSISTS", market_assist_odds, assist_ev),
         key=lambda c: c[2],
     )
+    source = str((market_odds or {}).get("source") or "baseline")
+    source_real = source.lower() not in ("", "baseline", "consensus", "demo")
     return {
         "player_id": player_id,
         "display_name": display_name,
@@ -1621,8 +1623,10 @@ def compute_point_scorer_projection(
         "best_prop_market": best_market,
         "best_prop_odds": int(best_odds),
         "best_prop_ev": round(float(best_ev), 4),
-        "is_positive_ev": bool(best_ev >= 0.035),
-        "odds_source": str((market_odds or {}).get("source") or "baseline"),
+        # Only count a prop as a pick when priced by a real book —
+        # baseline-estimated prices can never produce a pick.
+        "is_positive_ev": bool(best_ev >= 0.035 and source_real),
+        "odds_source": source,
     }
 
 

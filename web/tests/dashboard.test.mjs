@@ -610,18 +610,23 @@ test("best picks board merges +EV totals and props ranked by edge, excluding pos
     "prop pick missing headshot"
   );
 
-  // EV ranking: McDavid prop (+24.5%) > Matthews prop (+6.6%) > game total (+6.1%)
+  // Grouped sections: Game Totals precede Player Props; props rank by EV
+  // within their group (McDavid +24.5% > Matthews +6.6%).
+  const totalsIdx = picksHtml.indexOf("Game Totals");
+  const propsIdx = picksHtml.indexOf("Player Props");
   const mcdIdx = picksHtml.indexOf("1+ Point");
   const mattIdx = picksHtml.indexOf("Anytime Goal");
   const gameIdx = picksHtml.indexOf("OVER 6.5");
   assert.ok(
+    totalsIdx !== -1 && propsIdx !== -1 && totalsIdx < propsIdx,
+    "missing/unsorted pick sections"
+  );
+  assert.ok(
     mcdIdx !== -1 && mattIdx !== -1 && gameIdx !== -1,
     "missing expected picks"
   );
-  assert.ok(
-    mcdIdx < mattIdx && mattIdx < gameIdx,
-    "picks not ranked by EV descending"
-  );
+  assert.ok(gameIdx < mcdIdx, "totals section should precede props");
+  assert.ok(mcdIdx < mattIdx, "props not ranked by EV within section");
 
   // Postponed, final, and live games never leak onto the board
   // (fixture marks them +EV — status must still exclude them).

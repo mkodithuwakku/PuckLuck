@@ -503,9 +503,36 @@ def test_two_fantasy_teams_and_point_scorers_in_report(tmp_path: Path) -> None:
         assert isinstance(sc["assist_ev"], float)
         assert sc["best_prop_market"] in {"POINTS", "GOALS", "ASSISTS"}
         assert isinstance(sc["best_prop_odds"], int)
-    assert any(
-        sc["is_positive_ev"] is True and sc["best_prop_ev"] >= 0.035 for sc in scorers
+    # Baseline/demo prices are estimates, not real books: they must never
+    # surface as +EV picks.
+    assert all(sc["is_positive_ev"] is False for sc in scorers)
+    assert all(sc["odds_source"] in {"baseline", "consensus"} for sc in scorers)
+
+
+def test_prop_pick_gate_requires_real_book_price() -> None:
+    """Baseline-priced props can look +EV but must not become picks."""
+    shared = dict(
+        player_id=1,
+        display_name="Test Winger",
+        position="LW",
+        team_abbr="MIN",
+        opponent_abbr="VAN",
+        comps={"G": 0.4, "A": 0.6, "SOG": 2.5},
+        feats={},
+        projected_fp=4.0,
     )
+    baseline = refresh.compute_point_scorer_projection(
+        **shared,
+        market_odds={"source": "baseline", "point": 300},
+    )
+    assert baseline["best_prop_ev"] >= 0.035  # looks profitable on paper
+    assert baseline["is_positive_ev"] is False  # but is not a real pick
+    real = refresh.compute_point_scorer_projection(
+        **shared,
+        market_odds={"source": "Bovada", "point": 300},
+    )
+    assert real["is_positive_ev"] is True
+    assert real["odds_source"] == "Bovada"
 
 
 def test_sync_live_nhl_slate_projects_tonights_real_matchups(
