@@ -298,7 +298,7 @@ export function renderHeader(
         <path d="m39 25 2.5 5 6 .7-4.5 3.6 1.2 5.7-5.2-2.9-5.2 2.9 1.2-5.7-4.5-3.6 6-.7Z" fill="#c4f76b"/>
         <path d="m48 9 1.7 4.3L54 15l-4.3 1.7L48 21l-1.7-4.3L42 15l4.3-1.7Z" fill="#102d32"/>
       </svg>
-      <div class="pl-wordmark"><span class="pl-brand-name">Puck<span>Luck</span></span><span class="pl-brand-caption">THE DAILY HOCKEY EDGE</span></div>
+      <div class="pl-wordmark"><span class="pl-brand-name">Puck<span>Luck</span></span><span class="pl-brand-caption">DAILY HOCKEY DASHBOARD</span></div>
     </div>
     <div class="pl-header-pills">
       ${slateDate ? `<span class="pill pill-slate">Slate <strong>${slateDate}</strong></span>` : ""}
