@@ -13,7 +13,9 @@ import inspect
 import json
 import math
 import os
+import re
 import sqlite3
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
@@ -1058,6 +1060,10 @@ ESPN_SCOREBOARD_URL = (
     "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"
 )
 ODDSGAP_LINESHOP_URL = "https://theoddsgap.com/api/lineshop"
+BOVADA_NHL_URL = (
+    "https://www.bovada.lv/services/sports/event/coupon/"
+    "events/A/description/hockey/nhl"
+)
 _ODDSGAP_MATCH_TOLERANCE_SECONDS = 3600
 _NHL_FULL_NAMES: Dict[str, str] = {
     "Anaheim Ducks": "ANA",
@@ -1356,6 +1362,144 @@ def fetch_oddsgap_total_lines(
     return lines
 
 
+def _norm_name(name: Any) -> str:
+    """Accent/punctuation-insensitive player name for book → dim_players joins."""
+    s = unicodedata.normalize("NFKD", str(name or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z' ]", "", s.lower())).strip()
+
+
+def _american(value: Any) -> Optional[int]:
+    s = str(value or "").strip().upper()
+    if s == "EVEN":
+        return 100
+    try:
+        return int(s.lstrip("+"))
+    except ValueError:
+        return None
+
+
+def _bovada_player_name(text: Any) -> Tuple[str, Optional[str]]:
+    m = re.match(r"(.+?)\s*\(([A-Za-z]{2,3})\)\s*$", str(text or ""))
+    if not m:
+        return str(text or "").strip(), None
+    return m.group(1).strip(), m.group(2).upper()
+
+
+def fetch_bovada_props(
+    scheduled_games: Sequence[ScheduledGame],
+    *,
+    http_fetcher: Callable[[str], Any] = default_json_fetcher,
+) -> Tuple[List[Dict[str, Any]], List[MarketTotalLine]]:
+    """Real prop prices from Bovada's public NHL coupon feed (no key).
+
+    Returns ``(prop_offers, total_lines)`` where prop_offers carry
+    ``game_id/team_abbr/name/market/price`` and total_lines are per-game
+    ``MarketTotalLine`` rows for the Game Lines total market.
+    """
+    try:
+        payload = http_fetcher(BOVADA_NHL_URL)
+    except Exception:
+        return [], []
+    blocks = payload if isinstance(payload, list) else [payload]
+    events = [ev for block in blocks for ev in (block or {}).get("events") or []]
+    if not events:
+        return [], []
+
+    captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    offers: List[Dict[str, Any]] = []
+    totals: List[MarketTotalLine] = []
+    for game in scheduled_games:
+        start = _parse_utc(game.start_time_utc)
+        home_abbr = str(game.home_abbr).upper()
+        away_abbr = str(game.away_abbr).upper()
+        for ev in events:
+            desc = str(ev.get("description") or "")
+            if " @ " not in desc:
+                continue
+            away_name, home_name = (p.strip() for p in desc.split(" @ ", 1))
+            if _NHL_FULL_NAMES.get(home_name) != home_abbr:
+                continue
+            if _NHL_FULL_NAMES.get(away_name) != away_abbr:
+                continue
+            start_ms = _to_float(ev.get("startTime"), 0.0)
+            if start and start_ms:
+                drift = abs(start.timestamp() - start_ms / 1000.0)
+                if drift > _ODDSGAP_MATCH_TOLERANCE_SECONDS:
+                    continue
+            is_live = bool(ev.get("live"))
+            for grp in ev.get("displayGroups") or []:
+                for mk in grp.get("markets") or []:
+                    mdesc = str(mk.get("description") or "")
+                    # In-play totals are live-adjusted prices, not the pregame
+                    # line — keep them out of the consensus/history.
+                    if mdesc == "Total" and not is_live:
+                        over, under = {}, {}
+                        for oc in mk.get("outcomes") or []:
+                            label = str(oc.get("description") or "")
+                            price = _american((oc.get("price") or {}).get("american"))
+                            hc = _to_float((oc.get("price") or {}).get("handicap"), 0.0)
+                            if label == "Over" and price is not None:
+                                over = {"line": hc, "odds": price}
+                            elif label == "Under" and price is not None:
+                                under = {"line": hc, "odds": price}
+                        if over and under and over["line"] == under["line"]:
+                            totals.append(
+                                _make_market_line(
+                                    game.game_id,
+                                    over["line"],
+                                    over["odds"],
+                                    under["odds"],
+                                    captured,
+                                    sportsbook="Bovada",
+                                )
+                            )
+                    elif mdesc.startswith(
+                        ("Points Milestones - ", "Assists Milestones - ")
+                    ):
+                        name, abbr = _bovada_player_name(mdesc.split(" - ", 1)[1])
+                        market = (
+                            "PLAYER_POINTS"
+                            if mdesc.startswith("Points")
+                            else "PLAYER_ASSISTS"
+                        )
+                        want = (
+                            "To Score 1+ Points"
+                            if market == "PLAYER_POINTS"
+                            else "To Record 1+ Assists"
+                        )
+                        for oc in mk.get("outcomes") or []:
+                            if str(oc.get("description")) != want:
+                                continue
+                            price = _american((oc.get("price") or {}).get("american"))
+                            if price is not None:
+                                offers.append(
+                                    {
+                                        "game_id": game.game_id,
+                                        "team_abbr": abbr,
+                                        "name": name,
+                                        "market": market,
+                                        "price": price,
+                                    }
+                                )
+                    elif mdesc == "Anytime Goalscorer":
+                        for oc in mk.get("outcomes") or []:
+                            name, abbr = _bovada_player_name(oc.get("description"))
+                            price = _american((oc.get("price") or {}).get("american"))
+                            if price is not None:
+                                offers.append(
+                                    {
+                                        "game_id": game.game_id,
+                                        "team_abbr": abbr,
+                                        "name": name,
+                                        "market": "PLAYER_GOALS",
+                                        "price": price,
+                                    }
+                                )
+            break
+    return offers, totals
+
+
 def prob_to_fair_american(p: float) -> int:
     """Convert a probability to fair (vig-free) American odds."""
     p = min(max(float(p), 1e-6), 0.999999)
@@ -1396,13 +1540,20 @@ def _player_prop_odds(conn: sqlite3.Connection, player_id: int) -> Dict[str, int
         "PLAYER_ASSISTS": "assist",
     }
     out: Dict[str, Any] = {}
+    real_keys: set = set()
     for row in rows:
-        market, odds = row[0], row[1]
-        if sb_col and row[2]:
-            out["source"] = str(row[2])
-        key = key_map.get(str(market).upper())
-        if key:
-            out[key] = _to_int(odds, -110)
+        sb = str(row[2] or "") if sb_col else ""
+        is_real = sb.lower() not in ("", "baseline", "consensus")
+        if is_real:
+            out["source"] = sb
+        elif "source" not in out:
+            out["source"] = sb or "baseline"
+        key = key_map.get(str(row[0]).upper())
+        if key is None or (not is_real and key in real_keys):
+            continue
+        if is_real:
+            real_keys.add(key)
+        out[key] = _to_int(row[1], -110)
     return out
 
 
@@ -1537,6 +1688,68 @@ def _seed_baseline_props(conn: sqlite3.Connection, slate_date: str) -> None:
                     "season": "20262027",
                 }
             )
+    _insert_fact_rows(conn, "fact_market_lines", rows)
+
+
+def _seed_bovada_props(
+    conn: sqlite3.Connection,
+    scheduled: Sequence[ScheduledGame],
+    *,
+    http_fetcher: Callable[[str], Any] = default_json_fetcher,
+) -> None:
+    """Persist real Bovada prop prices matched to dim_players by name+team."""
+    offers, totals = fetch_bovada_props(scheduled, http_fetcher=http_fetcher)
+    for line in totals:
+        upsert_total_line(conn, line)
+    # Drop Bovada total rows for games already started — they were captured
+    # while live and are not pregame closes.
+    live_ids = [
+        int(g.game_id) for g in scheduled if _report_status(g.game_state) != "Scheduled"
+    ]
+    if live_ids:
+        marks = ", ".join("?" for _ in live_ids)
+        conn.execute(
+            "DELETE FROM fact_market_lines WHERE sportsbook = 'Bovada' "
+            f"AND market_type = 'TOTAL_GOALS' AND game_id IN ({marks})",
+            live_ids,
+        )
+    if not offers:
+        return
+    abbrs = _team_abbrs(conn)
+    name_col = _pick(_table_columns(conn, "dim_players"), "display_name", "name")
+    if not name_col:
+        return
+    # dim_players has no team_id — join each player's most recent skater game.
+    lookup: Dict[Tuple[str, str], int] = {}
+    for pid, nm, tid in conn.execute(
+        f"SELECT p.player_id, p.{name_col}, s.team_id FROM dim_players p "
+        "JOIN fact_skater_games s ON s.player_id = p.player_id "
+        "AND s.game_date = (SELECT MAX(f2.game_date) FROM fact_skater_games f2 "
+        "WHERE f2.player_id = p.player_id)"
+    ).fetchall():
+        ab = abbrs.get(int(tid)) if tid is not None else None
+        if ab:
+            lookup.setdefault((_norm_name(nm), ab.upper()), int(pid))
+    captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows: List[Dict[str, Any]] = []
+    for offer in offers:
+        pid = lookup.get((_norm_name(offer["name"]), offer["team_abbr"]))
+        if pid is None:
+            continue
+        rows.append(
+            {
+                "game_id": int(offer["game_id"]),
+                "sportsbook": "Bovada",
+                "market_type": offer["market"],
+                "market": offer["market"],
+                "target_id": str(pid),
+                "line": 0.5,
+                "over_odds": int(offer["price"]),
+                "under_odds": -120 if int(offer["price"]) > 0 else 110,
+                "captured_at": captured,
+                "season": "20262027",
+            }
+        )
     _insert_fact_rows(conn, "fact_market_lines", rows)
 
 
@@ -1682,6 +1895,7 @@ def sync_live_nhl_slate(
     if seed_local_teams and not os.environ.get("YAHOO_CLIENT_ID"):
         _seed_local_fantasy_teams(conn)
     _seed_baseline_props(conn, active)
+    _seed_bovada_props(conn, scheduled, http_fetcher=odds_fetcher or nhl_fetcher)
     conn.commit()
     return active, scheduled
 
@@ -1937,8 +2151,14 @@ def run_warehouse_pipeline(
         for r in skater_records
         if not slate_team_ids or r["team_id"] in slate_team_ids
     ]
-    point_scorers = [
-        compute_point_scorer_projection(
+    ended_team_ids = set()
+    if slate_states and slate_matchups:
+        for gid, (st, _h, _a) in slate_states.items():
+            if _report_status(st) != "Scheduled":
+                ended_team_ids.update(slate_matchups.get(gid, ()))
+
+    def _scorer(r):
+        item = compute_point_scorer_projection(
             player_id=r["player_id"],
             display_name=r["display_name"],
             position=r["position"],
@@ -1949,8 +2169,12 @@ def run_warehouse_pipeline(
             projected_fp=r["proj_fp"],
             market_odds=_player_prop_odds(conn, r["player_id"]),
         )
-        for r in scorer_records
-    ]
+        # A prop is only bettable before the player's game starts.
+        if r["team_id"] in ended_team_ids:
+            item["is_positive_ev"] = False
+        return item
+
+    point_scorers = [_scorer(r) for r in scorer_records]
     point_scorers.sort(key=lambda s: (-s["prob_point"], -s["best_prop_ev"]))
 
     return build_public_report(

@@ -368,7 +368,9 @@ function isEstimatedPrice(source) {
 }
 
 function priceSourceNote(source) {
-  return isEstimatedPrice(source) ? " · est. price" : "";
+  return isEstimatedPrice(source)
+    ? " · est. price"
+    : ` · ${esc(source)}`;
 }
 
 function propPick(p, season) {
