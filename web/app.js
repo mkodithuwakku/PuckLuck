@@ -179,6 +179,8 @@ function badge(label) {
     HOLD: "badge-hold",
     "+EV": "badge-ev",
     POSTPONED: "badge-postponed",
+    FINAL: "badge-final",
+    LIVE: "badge-live",
     "STALE DATA": "badge-stale",
   };
   return `<span class="badge ${classes[label] || "badge-projected"}">${esc(
@@ -188,6 +190,14 @@ function badge(label) {
 
 function goalieBadge(status) {
   return status ? badge(String(status).toUpperCase()) : "";
+}
+
+const ENDED_STATUSES = new Set(["POSTPONED", "FINAL", "LIVE"]);
+function isEnded(g) {
+  return ENDED_STATUSES.has(String(g.status || "").toUpperCase());
+}
+function isFinal(g) {
+  return String(g.status || "").toUpperCase() === "FINAL";
 }
 
 function evTier(ev) {
@@ -451,9 +461,7 @@ export function renderBestPicksTab(
   pointScorers = [],
   { season = "" } = {}
 ) {
-  const activeGames = (games || []).filter(
-    (g) => String(g.status || "").toUpperCase() !== "POSTPONED"
-  );
+  const activeGames = (games || []).filter((g) => !isEnded(g));
   const plays = [
     ...activeGames.filter((g) => g.is_positive_ev === true).map(totalPick),
     ...(pointScorers || [])
@@ -734,8 +742,7 @@ export function renderFreeAgentsTab(
 
 export function renderGameTotalsTab(games = []) {
   const rank = (g) => {
-    const postponed = String(g.status || "").toUpperCase() === "POSTPONED";
-    if (postponed) return { tier: 2, edge: 0 };
+    if (isEnded(g)) return { tier: 2, edge: 0 };
     if (g.is_positive_ev === true) return { tier: 0, edge: Number(g.ev || 0) };
     return {
       tier: 1,
@@ -755,14 +762,14 @@ export function renderGameTotalsTab(games = []) {
       );
     })
     .map((g) => {
-      const postponed =
-        String(g.status || "").toUpperCase() === "POSTPONED";
+      const ended = isEnded(g);
+      const final = isFinal(g);
       const [awayColor] = getTeamColors(g.away_abbr);
       const [homeColor] = getTeamColors(g.home_abbr);
       const evBadge =
-        g.is_positive_ev === true && !postponed ? badge("+EV") : "";
-      const statusBadge = postponed
-        ? badge("POSTPONED")
+        g.is_positive_ev === true && !ended ? badge("+EV") : "";
+      const statusBadge = ended
+        ? badge(String(g.status).toUpperCase())
         : g.status && g.status !== "Scheduled"
           ? badge(String(g.status).toUpperCase())
           : "";
@@ -800,8 +807,26 @@ export function renderGameTotalsTab(games = []) {
         : Math.max(0, expTotal - lamAway);
 
       const bestSide = String(g.best_side || "OVER").toUpperCase();
+      const leanOutcome =
+        g.lean_hit === true
+          ? `<span class="lean-outcome lean-hit">LEAN ${esc(bestSide)} ${fmt1(line)} ✓</span>`
+          : g.lean_hit === false
+            ? `<span class="lean-outcome lean-miss">LEAN ${esc(bestSide)} ${fmt1(line)} ✗</span>`
+            : final &&
+                Number(g.final_total) === line
+              ? `<span class="lean-outcome">PUSH</span>`
+              : "";
+      const finalRow = final
+        ? `<div class="final-row"><b>${esc(g.away_abbr)} ${esc(
+            String(g.final_away_score ?? "–")
+          )} – ${esc(g.home_abbr)} ${esc(
+            String(g.final_home_score ?? "–")
+          )}</b><span class="final-total">total ${fmt1(
+            g.final_total
+          )}</span>${leanOutcome}</div>`
+        : "";
       const bestPickBanner =
-        g.is_positive_ev === true && !postponed
+        g.is_positive_ev === true && !ended
           ? `<div class="ev-pick-banner">BEST PICK: <strong>${esc(
               bestSide
             )} ${fmt1(g.line)} ${fmtOdds(
@@ -814,7 +839,7 @@ export function renderGameTotalsTab(games = []) {
         ? `<span class="mls-src mls-src-est">EST. LINE</span>`
         : `<span class="mls-src">${esc(lineSrc)}</span>`;
 
-      const metrics = postponed
+      const metrics = ended && !final
         ? ""
         : `<div class="model-line-strip ${dirClass}">
     <div class="mls-box"><span class="mls-label">MODEL</span><b>${fmt1(
@@ -831,8 +856,10 @@ export function renderGameTotalsTab(games = []) {
       100,
       Math.max(0, probOverPct)
     )}%"></div></div>
-  </div>
-  <div class="game-metrics">
+  </div>${
+    final
+      ? finalRow
+      : `<div class="game-metrics">
     <span class="odds-chip${
       bestSide === "OVER" ? " odds-chip-best" : ""
     }">O ${fmtOdds(g.over_odds)}</span>
@@ -844,11 +871,12 @@ export function renderGameTotalsTab(games = []) {
     )}</b> · ${esc(g.home_abbr)} λ <b>${fmt2(lamHome)}</b></span>
     ${evBadge}
   </div>
-  ${bestPickBanner}`;
+  ${bestPickBanner}`
+  }`;
 
       return `<article class="game-card${
-        g.is_positive_ev === true && !postponed ? " game-card-ev" : ""
-      }">
+        g.is_positive_ev === true && !ended ? " game-card-ev" : ""
+      }${ended ? " game-card-ended" : ""}">
   <div class="game-card-accent" style="--away-color:${awayColor};--home-color:${homeColor}"></div>
   <div class="game-top">
     <span class="game-teams">${renderTeamLogo(g.away_abbr)} ${esc(

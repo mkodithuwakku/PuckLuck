@@ -129,6 +129,46 @@ function makeReport(overrides = {}) {
         home_goalie_status: "PROJECTED",
         away_goalie_status: "PROJECTED",
       },
+      {
+        game_id: 2026020003,
+        start_time_utc: "2026-10-23T16:00:00Z",
+        home_abbr: "CHI",
+        away_abbr: "FLA",
+        status: "Final",
+        expected_total: 6.9,
+        line: 6.5,
+        prob_over: 0.6,
+        prob_under: 0.4,
+        over_odds: -110,
+        under_odds: -110,
+        ev: 0.12,
+        is_positive_ev: true,
+        best_side: "OVER",
+        line_source: "21 books",
+        final_away_score: 3,
+        final_home_score: 2,
+        final_total: 5,
+        lean_hit: false,
+        home_goalie_status: "CONFIRMED",
+        away_goalie_status: "CONFIRMED",
+      },
+      {
+        game_id: 2026020004,
+        start_time_utc: "2026-10-23T18:00:00Z",
+        home_abbr: "DAL",
+        away_abbr: "NYI",
+        status: "Live",
+        expected_total: 6.4,
+        line: 6.5,
+        prob_over: 0.49,
+        prob_under: 0.51,
+        ev: 0.09,
+        is_positive_ev: true,
+        best_side: "UNDER",
+        line_source: "18 books",
+        home_goalie_status: "CONFIRMED",
+        away_goalie_status: "CONFIRMED",
+      },
     ],
     free_agents: [
       {
@@ -441,12 +481,28 @@ test("handles postponed games, zero-shot appearances, and unconfirmed goalies", 
   assert.ok(activeCard.includes("game-card-ev"));
   assert.ok(!activeCard.includes("POSTPONED"));
 
-  const postponedCard = totalsHtml.split('<article class="game-card')[2];
+  // Muted tier sorts by start time: Final (16:00) → POSTPONED (17:00) → LIVE (18:00).
+  const finalCard = totalsHtml.split('<article class="game-card')[2];
+  assert.ok(finalCard.includes("FINAL"));
+  assert.ok(finalCard.includes("FLA 3 – CHI 2"), "missing final score");
+  assert.ok(finalCard.includes("total 5.0"), "missing final total");
+  assert.ok(finalCard.includes("LEAN OVER 6.5 ✗"), "missing lean outcome");
+  assert.ok(!finalCard.includes("+EV"), "final game leaked +EV tag");
+  assert.ok(!finalCard.includes("BEST PICK:"), "final game leaked odds");
+
+  const postponedCard = totalsHtml.split('<article class="game-card')[3];
   assert.ok(postponedCard.includes("POSTPONED"));
   assert.ok(!postponedCard.includes("+EV"), "postponed game leaked +EV tag");
   assert.ok(
     !postponedCard.includes("MODEL LEANS"),
     "postponed game leaked model strip"
+  );
+
+  const liveCard = totalsHtml.split('<article class="game-card')[4];
+  assert.ok(liveCard.includes("LIVE"));
+  assert.ok(
+    !liveCard.includes("MODEL LEANS"),
+    "live game leaked model strip (stale prices)"
   );
 
   assert.ok(activeCard.includes("+EV"));
@@ -567,8 +623,11 @@ test("best picks board merges +EV totals and props ranked by edge, excluding pos
     "picks not ranked by EV descending"
   );
 
-  // Postponed CAR @ TOR game never leaks onto the board.
+  // Postponed, final, and live games never leak onto the board
+  // (fixture marks them +EV — status must still exclude them).
   assert.ok(!picksHtml.includes("CAR @ TOR"));
+  assert.ok(!picksHtml.includes("FLA @ CHI"), "finished game leaked onto picks");
+  assert.ok(!picksHtml.includes("NYI @ DAL"), "live game leaked onto picks");
 
   // Thin slate pads with muted model leans (MacKinnon is the only non-EV scorer).
   assert.ok(picksHtml.includes("Model Leans"));

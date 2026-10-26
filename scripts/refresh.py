@@ -142,6 +142,10 @@ GAME_ITEM_ALLOWLIST: FrozenSet[str] = frozenset(
         "home_goalie_status",
         "away_goalie_status",
         "line_source",
+        "final_home_score",
+        "final_away_score",
+        "final_total",
+        "lean_hit",
     }
 )
 FREE_AGENT_ALLOWLIST: FrozenSet[str] = frozenset(
@@ -1103,6 +1107,22 @@ def _game_finished(game: Dict[str, Any]) -> bool:
     return str(game.get("gameState") or "").upper() in _FINISHED_STATES
 
 
+_LIVE_STATES: FrozenSet[str] = frozenset({"LIVE", "CRIT"})
+_POSTPONED_STATES: FrozenSet[str] = frozenset({"PPD", "POSTPONED", "SUSP"})
+
+
+def _report_status(game_state: str) -> str:
+    """NHL ``gameState`` → the report's status vocabulary."""
+    state = str(game_state or "").upper()
+    if state in _FINISHED_STATES:
+        return "Final"
+    if state in _LIVE_STATES:
+        return "Live"
+    if state in _POSTPONED_STATES:
+        return "Postponed"
+    return "Scheduled"
+
+
 def _week_days(
     payload: Dict[str, Any], fallback_date: str
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -1661,6 +1681,7 @@ def run_warehouse_pipeline(
     active_slate_date: Optional[str] = None,
     slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
     slate_start_times: Optional[Dict[int, str]] = None,
+    slate_states: Optional[Dict[int, Tuple[str, Optional[int], Optional[int]]]] = None,
     model_params: Optional[TunedModelParams] = None,
     model_params_path: Union[str, Path] = DEFAULT_MODEL_PARAMS_PATH,
     model_health: Optional[Union[BacktestReport, Dict[str, Any]]] = None,
@@ -1818,6 +1839,7 @@ def run_warehouse_pipeline(
         abbrs,
         slate_matchups,
         slate_start_times=slate_start_times,
+        slate_states=slate_states,
         base_rate=params.poisson_base_rate,
     )
 
@@ -1932,6 +1954,7 @@ def _build_game_items(
     slate_matchups: Optional[Dict[int, Tuple[int, int]]] = None,
     *,
     slate_start_times: Optional[Dict[int, str]] = None,
+    slate_states: Optional[Dict[int, Tuple[str, Optional[int], Optional[int]]]] = None,
     base_rate: float = 3.05,
 ) -> Tuple[List[Dict[str, Any]], FrozenSet[int]]:
     """Build the games list; returns (items, team_ids on tonight's slate)."""
@@ -1989,30 +2012,42 @@ def _build_game_items(
         best_side, best_ev = (
             ("OVER", ev_over) if ev_over >= ev_under else ("UNDER", ev_under)
         )
-        items.append(
-            {
-                "game_id": game_id,
-                "start_time_utc": (slate_start_times or {}).get(game_id)
-                or f"{as_of_date}T01:00:00Z",
-                "home_abbr": abbrs.get(home_id),
-                "away_abbr": abbrs.get(away_id),
-                "status": "Scheduled",
-                "lambda_home": round(lam_home, 2),
-                "lambda_away": round(lam_away, 2),
-                "expected_total": round(expected_total, 2),
-                "line": market["line"],
-                "over_odds": int(market["over_odds"]),
-                "under_odds": int(market["under_odds"]),
-                "prob_over": round(prob_over, 4),
-                "prob_under": round(prob_under, 4),
-                "best_side": best_side,
-                "ev": round(best_ev, 4),
-                "is_positive_ev": bool(best_ev >= 0.035),
-                "line_source": str(market.get("sportsbook") or "consensus"),
-                "home_goalie_status": "CONFIRMED",
-                "away_goalie_status": "PROJECTED",
-            }
+        state, final_home, final_away = (slate_states or {}).get(
+            game_id, ("", None, None)
         )
+        status = _report_status(state)
+        item = {
+            "game_id": game_id,
+            "start_time_utc": (slate_start_times or {}).get(game_id)
+            or f"{as_of_date}T01:00:00Z",
+            "home_abbr": abbrs.get(home_id),
+            "away_abbr": abbrs.get(away_id),
+            "status": status,
+            "lambda_home": round(lam_home, 2),
+            "lambda_away": round(lam_away, 2),
+            "expected_total": round(expected_total, 2),
+            "line": market["line"],
+            "over_odds": int(market["over_odds"]),
+            "under_odds": int(market["under_odds"]),
+            "prob_over": round(prob_over, 4),
+            "prob_under": round(prob_under, 4),
+            "best_side": best_side,
+            "ev": round(best_ev, 4),
+            # Only a not-yet-started game can carry a bettable pick.
+            "is_positive_ev": bool(best_ev >= 0.035 and status == "Scheduled"),
+            "line_source": str(market.get("sportsbook") or "consensus"),
+            "home_goalie_status": "CONFIRMED",
+            "away_goalie_status": "PROJECTED",
+        }
+        if status == "Final" and final_home is not None and final_away is not None:
+            total = final_home + final_away
+            item["final_home_score"] = final_home
+            item["final_away_score"] = final_away
+            item["final_total"] = total
+            if total != float(market["line"]):
+                over_hit = total > float(market["line"])
+                item["lean_hit"] = bool(over_hit) == (best_side == "OVER")
+        items.append(item)
     return items, frozenset(slate_team_ids)
 
 
@@ -2075,10 +2110,14 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
                 g.game_id: (g.home_team_id, g.away_team_id) for g in scheduled
             }
             slate_start_times = {g.game_id: g.start_time_utc for g in scheduled}
+            slate_states = {
+                g.game_id: (g.game_state, g.home_score, g.away_score) for g in scheduled
+            }
         else:
             active_date = args.date
             slate_matchups = None
             slate_start_times = None
+            slate_states = None
             if args.demo or _dim_players_empty(conn):
                 seed_demo_warehouse(conn, as_of_date=args.date)
         bt_report: Optional[BacktestReport] = None
@@ -2091,6 +2130,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Path:
             active_slate_date=active_date,
             slate_matchups=slate_matchups,
             slate_start_times=slate_start_times,
+            slate_states=slate_states,
             model_params_path=args.params_path,
             model_health=bt_report,
         )

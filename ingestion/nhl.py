@@ -55,6 +55,9 @@ class ScheduledGame:
     away_abbr: str
     away_name: str
     venue: str
+    game_state: str = ""  # NHL gameState: FUT, PRE, LIVE, CRIT, OFF, FINAL, ...
+    home_score: Optional[int] = None
+    away_score: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +169,17 @@ def _scheduled_game(raw: Dict[str, Any], game_date: str) -> ScheduledGame:
         away_abbr=str(away.get("abbrev") or ""),
         away_name=_team_full_name(away),
         venue=_local_name(raw.get("venue")),
+        game_state=str(raw.get("gameState") or ""),
+        home_score=_opt_int(home.get("score")),
+        away_score=_opt_int(away.get("score")),
     )
+
+
+def _opt_int(value: Any) -> Optional[int]:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_schedule(
