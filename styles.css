@@ -359,11 +359,151 @@ main.pl-main {
   color: var(--text-secondary);
   text-transform: uppercase;
   margin: 6px 0 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.st-meta {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--steel-muted);
+  text-transform: none;
 }
 .picks-subhead {
   margin-top: 14px;
   padding-top: 10px;
   border-top: 1px dashed var(--line-subtle);
+}
+.picks-group:first-of-type {
+  margin-top: 4px;
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* ---------- KPI strip (dashboard glance row) ---------- */
+.kpi-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  align-items: stretch;
+}
+.kpi-strip::-webkit-scrollbar {
+  display: none;
+}
+.kpi {
+  flex: 1 0 62px;
+  min-width: 62px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-glass);
+  border-radius: 9px;
+  padding: 6px 8px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.kpi b {
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+.kpi span {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  color: var(--steel-muted);
+  margin-top: 1px;
+}
+.kpi-good b {
+  color: var(--emerald);
+  text-shadow: 0 0 10px rgba(47, 191, 113, 0.35);
+}
+.kpi-live b {
+  color: var(--danger);
+}
+.kpi-done b {
+  color: var(--steel-muted);
+}
+.kpi-book b {
+  color: var(--accent-cyan);
+}
+.kpi-updated {
+  align-self: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--steel-muted);
+  white-space: nowrap;
+  padding-left: 2px;
+}
+
+/* ---------- Slate pulse chips + nav badge + footer ---------- */
+.pulse-strip {
+  display: flex;
+  gap: 5px;
+  margin: 0 0 9px;
+  flex-wrap: wrap;
+}
+.pulse-chip {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-glass);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+}
+.pulse-chip.pulse-scheduled {
+  color: var(--accent-cyan);
+  border-color: rgba(77, 166, 255, 0.4);
+}
+.pulse-chip.pulse-live {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.pulse-chip.pulse-final {
+  color: var(--steel-muted);
+}
+.pulse-chip.pulse-postponed {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.nav-btn {
+  position: relative;
+}
+.nav-count {
+  position: absolute;
+  top: 3px;
+  right: calc(50% - 22px);
+  min-width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--emerald);
+  color: #0b0e12;
+  font-size: 8.5px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+}
+
+.pl-foot {
+  padding: 16px 12px 86px;
+  text-align: center;
+  font-size: 9.5px;
+  color: var(--steel-muted);
+  letter-spacing: 0.03em;
+}
+@media (min-width: 768px) {
+  .pl-foot {
+    padding-bottom: 16px;
+  }
 }
 
 .empty-state {
@@ -389,6 +529,24 @@ main.pl-main {
   border: 1px solid var(--border-glass);
   border-radius: 10px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+}
+
+.roster-row,
+.fa-row,
+.scorer-row,
+.pick-row,
+.game-card {
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+@media (hover: hover) {
+  .roster-row:hover,
+  .fa-row:hover,
+  .scorer-row:hover,
+  .pick-row:hover,
+  .game-card:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 5px 18px rgba(0, 0, 0, 0.38);
+  }
 }
 
 .roster-row,
@@ -1022,6 +1180,18 @@ main.pl-main {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.src-note {
+  margin-left: auto;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  text-transform: uppercase;
 }
 .game-goalies {
   margin-top: 6px;
