@@ -289,7 +289,17 @@ export function renderHeader(
   const kpi = renderKpiStrip(report, generated);
   return `<header class="pl-header">
   <div class="pl-header-top">
-    <div class="pl-brand"><span class="pl-brand-mark">PL</span><span class="pl-brand-name">PuckLuck</span></div>
+    <div class="pl-brand">
+      <svg class="pl-brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+        <rect width="64" height="64" rx="18" fill="#c4f76b"/>
+        <path d="M10 21h16M7 28h15M12 35h9" stroke="#102d32" stroke-width="3" stroke-linecap="round"/>
+        <path d="M21 33v9c0 6 8 10 18 10s18-4 18-10v-9" fill="#102d32"/>
+        <ellipse cx="39" cy="33" rx="18" ry="10" fill="#102d32" stroke="#c4f76b" stroke-width="2"/>
+        <path d="m39 25 2.5 5 6 .7-4.5 3.6 1.2 5.7-5.2-2.9-5.2 2.9 1.2-5.7-4.5-3.6 6-.7Z" fill="#c4f76b"/>
+        <path d="m48 9 1.7 4.3L54 15l-4.3 1.7L48 21l-1.7-4.3L42 15l4.3-1.7Z" fill="#102d32"/>
+      </svg>
+      <div class="pl-wordmark"><span class="pl-brand-name">Puck<span>Luck</span></span><span class="pl-brand-caption">THE DAILY HOCKEY EDGE</span></div>
+    </div>
     <div class="pl-header-pills">
       ${slateDate ? `<span class="pill pill-slate">Slate <strong>${slateDate}</strong></span>` : ""}
       <button type="button" class="pill pill-live" id="sync-now-btn" title="Refresh report now"><span class="live-dot"></span>LIVE · 5m Sync</button>
@@ -547,7 +557,11 @@ export function renderBestPicksTab(
   }
 
   return `<section class="tab-panel" data-panel="picks">
-  <div class="section-title">Today's Top Plays<span class="st-meta">${playCount} +EV</span></div>
+  <div class="board-heading">
+    <div><span class="board-eyebrow">ON THE ICE. ON THE NUMBERS.</span><h1>Today's top plays<span>.</span></h1><p>Player props first. Real book prices. Model-driven edges.</p></div>
+    <span class="board-stamp" aria-hidden="true">NHL<span>DAILY<br>BOARD</span></span>
+  </div>
+  <div class="section-title">The picks board<span class="st-meta">${playCount} +EV plays</span></div>
   ${
     rows ||
     `<div class="empty-state">No edges on tonight's slate — check back closer to puck drop.</div>`

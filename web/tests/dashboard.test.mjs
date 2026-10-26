@@ -282,8 +282,8 @@ function makeReport(overrides = {}) {
 
 test("renders picks-first dashboard offline with required visual tokens, logos, headshots, and five tabs", async () => {
   const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
-  assert.ok(css.includes("#141619"), "missing deep-charcoal base");
-  assert.ok(css.includes("#1c2026"), "missing ice-steel surface");
+  assert.ok(css.includes("#08171c"), "missing midnight base");
+  assert.ok(css.includes("#c4f76b"), "missing lime brand accent");
   assert.ok(css.includes("#4da6ff"), "missing frost-cyan accent");
 
   const manifest = JSON.parse(
