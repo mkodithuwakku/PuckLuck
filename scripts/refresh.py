@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
@@ -1400,10 +1401,28 @@ def fetch_bovada_props(
     ``game_id/team_abbr/name/market/price`` and total_lines are per-game
     ``MarketTotalLine`` rows for the Game Lines total market.
     """
+    payload = None
     try:
         payload = http_fetcher(BOVADA_NHL_URL)
     except Exception:
-        return [], []
+        pass
+    if not payload:
+        try:
+            req = urllib.request.Request(
+                BOVADA_NHL_URL,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return [], []
     blocks = payload if isinstance(payload, list) else [payload]
     events = [ev for block in blocks for ev in (block or {}).get("events") or []]
     if not events:

@@ -49,6 +49,28 @@ jobs:
           export PUCKLUCK_LIVE_DATE="$(date -u +%Y-%m-%d)"
           python -m scripts.refresh --live || python -m scripts.refresh --demo
 
+      - name: Preserve upstream real player picks from gh-pages branch
+        run: |
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages 2>/dev/null || true
+          python -c '
+          import json, subprocess
+          try:
+              local_rep = json.load(open("dist/report.json"))
+              cloud_picks = sum(1 for p in local_rep.get("point_scorers", []) if p.get("is_positive_ev"))
+              if cloud_picks == 0:
+                  res = subprocess.run(["git", "show", "origin/gh-pages:report.json"], capture_output=True, text=True)
+                  if res.returncode == 0 and res.stdout.strip():
+                      gh_rep = json.loads(res.stdout)
+                      if gh_rep.get("active_slate_date") == local_rep.get("active_slate_date"):
+                          gh_picks = sum(1 for p in gh_rep.get("point_scorers", []) if p.get("is_positive_ev"))
+                          if gh_picks > 0:
+                              with open("dist/report.json", "w") as f:
+                                  f.write(res.stdout)
+                              print("Preserved", gh_picks, "real player picks from gh-pages branch")
+          except Exception as exc:
+              print("Pick preservation notice:", exc)
+          '
+
       - name: Stage static GitHub Pages bundle (_site)
         run: |
           rm -rf _site
